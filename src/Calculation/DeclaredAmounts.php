@@ -6,6 +6,7 @@ namespace Quittio\Core\Calculation;
 
 use Brick\Math\BigDecimal;
 use Brick\Money\Money;
+use Exception;
 use Quittio\Core\Data\AllowanceCharge\DocumentAllowanceCharge;
 use Quittio\Core\Data\AllowanceCharge\LineAllowanceCharge;
 use Quittio\Core\Data\InvoiceData;
@@ -14,7 +15,6 @@ use Quittio\Core\Data\Lines\LineVat;
 use Quittio\Core\Data\Meta;
 use Quittio\Core\Data\Totals\VatBreakdown;
 use Quittio\Core\Enums\VatCategory;
-use Throwable;
 
 /**
  * Declared amounts of an existing document (Meta::FLAG_DECLARED_AMOUNTS): whether they are
@@ -46,17 +46,19 @@ final class DeclaredAmounts
      * (BT-111) exactly, e.g. because another system rounded per line or a partial cancellation
      * aligns its VAT with earlier ones. Data calculated by Quittio never needs declared amounts.
      */
-    public static function needed(InvoiceData $data): bool
+    public static function needed(InvoiceData $data, TotalsCalculator $calculator = new En16931Calculator): bool
     {
         if (! self::hasAmounts($data)) {
             return false;
         }
 
         try {
-            $calculated = (new En16931Calculator)->calculate($data->with([
+            $calculated = $calculator->calculate($data->with([
                 'meta' => $data->meta->withFlag(Meta::FLAG_DECLARED_AMOUNTS, false)->withAmountsFingerprint(null),
             ]));
-        } catch (Throwable) {
+        } catch (Exception) {
+            // Data the calculator rejects (e.g. amounts in another currency) cannot be reproduced;
+            // errors such as a TypeError are programming errors and are not hidden.
             return true;
         }
 

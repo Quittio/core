@@ -6,7 +6,7 @@ namespace Quittio\Core\Data;
 
 use Brick\Math\RoundingMode;
 use Brick\Money\Money;
-use InvalidArgumentException;
+use JsonException;
 use Quittio\Core\Codes\RawCode;
 use Quittio\Core\Data\AllowanceCharge\DocumentAllowance;
 use Quittio\Core\Data\AllowanceCharge\DocumentCharge;
@@ -30,6 +30,8 @@ use Quittio\Core\Data\Totals\Totals;
 use Quittio\Core\Data\Totals\VatBreakdown;
 use Quittio\Core\Enums\InvoiceTypeCode;
 use Quittio\Core\Enums\TaxPointDateCode;
+use Quittio\Core\Exceptions\HydrationException;
+use Quittio\Core\Exceptions\InvalidArgumentException;
 use Quittio\Core\Mapping\Attributes as Q;
 use Quittio\Core\Profiles\ProfileLevel;
 use Quittio\Core\Serialization\ArrayHydrator;
@@ -83,7 +85,7 @@ final readonly class InvoiceData
         public ?Date $taxPointDate = null,
         #[Q\Bt('BT-8'), Q\Cardinality('0..1'), Q\Level(ProfileLevel::BasicWl), Q\Cii('ram:ApplicableTradeTax/ram:DueDateTypeCode'), Q\Ubl('cac:InvoicePeriod/cbc:DescriptionCode')]
         public TaxPointDateCode|RawCode|null $taxPointDateCode = null,
-        #[Q\Bt('BT-9'), Q\Cardinality('0..1'), Q\Level(ProfileLevel::BasicWl), Q\Cii('ram:SpecifiedTradePaymentTerms/ram:DueDateDateTime'), Q\Ubl('cbc:DueDate')]
+        #[Q\Bt('BT-9'), Q\Cardinality('0..1'), Q\Level(ProfileLevel::BasicWl), Q\Cii('ram:SpecifiedTradePaymentTerms/ram:DueDateDateTime'), Q\Ubl('cbc:DueDate (CreditNote: cac:PaymentMeans/cbc:PaymentDueDate)')]
         public ?Date $dueDate = null,
         #[Q\Bt('BT-10'), Q\Cardinality('0..1'), Q\Level(ProfileLevel::Minimum), Q\RequiredIn('xrechnung'), Q\Cii('ram:ApplicableHeaderTradeAgreement/ram:BuyerReference'), Q\Ubl('cbc:BuyerReference')]
         public ?string $buyerReference = null,
@@ -123,9 +125,9 @@ final readonly class InvoiceData
         public ?Period $invoicingPeriod = null,
         #[Q\Bt('BG-16'), Q\Cardinality('0..1'), Q\Level(ProfileLevel::BasicWl), Q\RequiredIn('xrechnung'), Q\Cii('ram:SpecifiedTradeSettlementPaymentMeans'), Q\Ubl('cac:PaymentMeans')]
         public ?PaymentInstructions $paymentInstructions = null,
-        #[Q\Bt('BG-20'), Q\Cardinality('0..n'), Q\Level(ProfileLevel::BasicWl), Q\ListOf(DocumentAllowance::class), Q\Cii('ram:SpecifiedTradeAllowanceCharge[ChargeIndicator=false]'), Q\Ubl('cac:AllowanceCharge[cbc:ChargeIndicator=false]')]
+        #[Q\Bt('BG-20'), Q\Cardinality('0..n'), Q\Level(ProfileLevel::BasicWl), Q\ListOf(DocumentAllowance::class), Q\Cii('ram:SpecifiedTradeAllowanceCharge[ram:ChargeIndicator/udt:Indicator="false"]'), Q\Ubl('cac:AllowanceCharge[cbc:ChargeIndicator="false"]')]
         public array $allowances = [],
-        #[Q\Bt('BG-21'), Q\Cardinality('0..n'), Q\Level(ProfileLevel::BasicWl), Q\ListOf(DocumentCharge::class), Q\Cii('ram:SpecifiedTradeAllowanceCharge[ChargeIndicator=true]'), Q\Ubl('cac:AllowanceCharge[cbc:ChargeIndicator=true]')]
+        #[Q\Bt('BG-21'), Q\Cardinality('0..n'), Q\Level(ProfileLevel::BasicWl), Q\ListOf(DocumentCharge::class), Q\Cii('ram:SpecifiedTradeAllowanceCharge[ram:ChargeIndicator/udt:Indicator="true"]'), Q\Ubl('cac:AllowanceCharge[cbc:ChargeIndicator="true"]')]
         public array $charges = [],
         #[Q\Bt('BG-22'), Q\Cardinality('1'), Q\Level(ProfileLevel::Minimum), Q\Computed, Q\Cii('ram:SpecifiedTradeSettlementHeaderMonetarySummation'), Q\Ubl('cac:LegalMonetaryTotal')]
         public ?Totals $totals = null,
@@ -257,7 +259,11 @@ final readonly class InvoiceData
 
     public static function fromJson(string $json): self
     {
-        $data = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+        try {
+            $data = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $e) {
+            throw HydrationException::at('', 'Invalid JSON: '.$e->getMessage(), $e);
+        }
         if (! is_array($data)) {
             throw new InvalidArgumentException('Invoice JSON must decode to an object.');
         }

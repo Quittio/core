@@ -14,6 +14,7 @@ use Quittio\Core\Data\Meta;
 use Quittio\Core\Enums\InvoiceTypeCode;
 use Quittio\Core\Profiles\Syntax;
 use Quittio\Core\Validation\Rule;
+use Quittio\Core\Xml\XmlBuilder;
 
 /**
  * Package rules (QUITTIO-…) that go beyond EN 16931.
@@ -110,6 +111,15 @@ final class QuittioRules
                     $report->error('BG-DEX-09', 'xrechnungExtension.thirdPartyPayments');
                 }
             }),
+            // The UBL binding of EN 16931 has no cbc:DueDate in a CreditNote; BT-9 goes into
+            // cac:PaymentMeans, which needs a payment means code (BT-81).
+            $r('QUITTIO-CREDIT-NOTE-DUE-DATE', 'A UBL credit note transmits the payment due date (BT-9) only with payment instructions (BG-16); the due date :value is left out.', function (InvoiceData $i, RuleReporter $report): void {
+                $profile = $report->context()->profile;
+                $syntax = $report->context()->option('syntax') ?? ($profile->syntaxes() === [Syntax::Ubl] ? Syntax::Ubl : null);
+                if ($syntax === Syntax::Ubl && $i->isCreditNote() && $i->dueDate !== null && $i->paymentInstructions === null) {
+                    $report->warning('BT-9', 'dueDate', ['value' => $i->dueDate->toIsoString()]);
+                }
+            }),
             // Also for a partial cancellation aligned with the earlier ones when its VAT differs by more
             // than 0.01 or has the sign of neither its taxable amount nor zero.
             $r('QUITTIO-VAT-ROUNDING', 'The VAT amount of category :category (:rate %) differs from taxable amount × rate by :value. The official rules tolerate this, but the amount is not rounded commercially.', function (InvoiceData $i, RuleReporter $report): void {
@@ -169,6 +179,15 @@ final class QuittioRules
                 }
                 if ($sum > $total) {
                     $report->error('BG-24', 'attachments', ['value' => $total]);
+                }
+            }),
+            // DOMDocument writes such characters unchanged, so the XML would not be well-formed;
+            // XmlBuilder refuses them, this rule names the field before.
+            $r('QUITTIO-INVALID-CHARACTERS', 'The text in :value contains control characters or invalid UTF-8, which XML cannot represent.', function (InvoiceData $i, RuleReporter $report): void {
+                $data = $i->toArray();
+                unset($data['meta']);
+                foreach (self::nonXmlTexts($data) as $path) {
+                    $report->error(null, $path, ['value' => $path]);
                 }
             }),
             $r('QUITTIO-GENERIC-COUNTRY', 'No country pack is installed for the seller country :value. Only EN 16931 rules are checked; national mandatory information is not validated.', function (InvoiceData $i, RuleReporter $report): void {
@@ -256,6 +275,27 @@ final class QuittioRules
             }
             self::checkSubLineVat($sub, $report);
         }
+    }
+
+    /**
+     * Paths of the strings that XML 1.0 cannot represent.
+     *
+     * @param  array<array-key, mixed>  $data
+     * @return list<string>
+     */
+    private static function nonXmlTexts(array $data, string $prefix = ''): array
+    {
+        $paths = [];
+        foreach ($data as $key => $value) {
+            $path = is_int($key) ? "{$prefix}[{$key}]" : ($prefix === '' ? $key : "{$prefix}.{$key}");
+            if (is_array($value)) {
+                $paths = [...$paths, ...self::nonXmlTexts($value, $path)];
+            } elseif (is_string($value) && ! XmlBuilder::isXmlText($value)) {
+                $paths[] = $path;
+            }
+        }
+
+        return $paths;
     }
 
     private static function vatLabel(InvoiceLine $line): string

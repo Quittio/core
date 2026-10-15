@@ -7,6 +7,7 @@ namespace Quittio\Core;
 use Closure;
 use Psr\Log\LoggerInterface;
 use Quittio\Core\Builder\InvoiceBuilder;
+use Quittio\Core\Calculation\CalculationException;
 use Quittio\Core\Calculation\En16931Calculator;
 use Quittio\Core\Calculation\TotalsCalculator;
 use Quittio\Core\Contracts\ProvidesInvoiceData;
@@ -23,6 +24,7 @@ use Quittio\Core\Data\Presentation\Presentation;
 use Quittio\Core\Documents\DocumentCalculator;
 use Quittio\Core\Documents\DocumentData;
 use Quittio\Core\Exceptions\ConfigurationException;
+use Quittio\Core\Exceptions\InvalidInvoiceData;
 use Quittio\Core\Formats\DefaultFormatResolver;
 use Quittio\Core\Formats\ExtendedFeatures;
 use Quittio\Core\Formats\FormatRegistry;
@@ -34,21 +36,25 @@ use Quittio\Core\Pdf\PdfEmbeddedFileExtractor;
 use Quittio\Core\Pdf\PdfException;
 use Quittio\Core\Pdf\PdfRenderer;
 use Quittio\Core\Pdf\PostProcessing\MpdfPostProcessor;
+use Quittio\Core\Pdf\PostProcessing\PdfPostProcessor;
 use Quittio\Core\Pdf\Qr\PaymentQrGenerator;
 use Quittio\Core\Pdf\Renderers\MpdfRenderer;
 use Quittio\Core\Pdf\RenderRequest;
+use Quittio\Core\Profiles\Capabilities\DescribesEmbeddedXml;
 use Quittio\Core\Profiles\Profile;
 use Quittio\Core\Profiles\ProfileLevel;
 use Quittio\Core\Profiles\ProfileRegistry;
 use Quittio\Core\Profiles\Syntax;
 use Quittio\Core\Reading\InvoiceReader;
 use Quittio\Core\Reading\ReadResult;
+use Quittio\Core\Reading\UnreadableInvoiceException;
 use Quittio\Core\Rendering\PendingDocument;
 use Quittio\Core\Rendering\PendingInvoice;
 use Quittio\Core\Rendering\PreparedInvoice;
 use Quittio\Core\Rendering\RenderedDocument;
 use Quittio\Core\Rendering\RenderedInvoice;
 use Quittio\Core\Rendering\RenderOptions;
+use Quittio\Core\Serialization\Snapshots\SnapshotUpcasterChain;
 use Quittio\Core\Support\Date;
 use Quittio\Core\Templates\PhpTemplateEngine;
 use Quittio\Core\Templates\TemplateEngine;
@@ -73,6 +79,7 @@ use Quittio\Core\View\ViewModelFactory;
 use Quittio\Core\Xml\Cii\CiiWriter;
 use Quittio\Core\Xml\SerializationOptions;
 use Quittio\Core\Xml\Ubl\UblWriter;
+use Quittio\Core\Xml\UnsafeXmlException;
 use Quittio\Core\Xml\XmlSerializer;
 
 /**
@@ -104,6 +111,12 @@ final class Quittio
     /** @var (Closure(InvoiceData, list<MandatoryField>): void)|null */
     private ?Closure $mandatoryFieldListener = null;
 
+    /** PDF/A and XML embedding for renderers that cannot embed; null = MpdfPostProcessor. */
+    private ?PdfPostProcessor $postProcessor = null;
+
+    /** @var array<string, Closure(): void> see onResetState() */
+    private static array $stateResetters = [];
+
     public function __construct(
         private readonly Config $config = new Config,
         private readonly ProfileRegistry $profiles = new ProfileRegistry,
@@ -119,7 +132,37 @@ final class Quittio
     ) {
         $this->formatResolver = $formatResolver ?? new DefaultFormatResolver($config->profile ?? self::DEFAULT_PROFILE, $config->autoUpgradeProfile);
         $this->countryResolver = $countryResolver ?? new DefaultCountryResolver($countries, $config->country);
-        $this->withSerializer(new CiiWriter)->withSerializer(new UblWriter);
+        $this->addSerializer(new CiiWriter)->addSerializer(new UblWriter);
+    }
+
+    /**
+     * Resets the process-wide state: the translator of Translations, the default snapshot
+     * upcasters of SnapshotUpcasterChain::default(), the application default VAT of
+     * InvoiceBuilder::useDefaultVat() and the state that extensions registered with
+     * onResetState() (e.g. the base rates of quittio/country-de).
+     *
+     * Test suites call it between tests, long-running processes between tenants. The Laravel
+     * integration sets the state again when the application boots.
+     */
+    public static function resetState(): void
+    {
+        Translations::reset();
+        SnapshotUpcasterChain::useDefault(null);
+        InvoiceBuilder::useDefaultVat(null);
+        foreach (self::$stateResetters as $reset) {
+            $reset();
+        }
+    }
+
+    /**
+     * Registers process-wide state of an extension with resetState(). A second registration
+     * under the same key replaces the first.
+     *
+     * @param  Closure(): void  $reset
+     */
+    public static function onResetState(string $key, Closure $reset): void
+    {
+        self::$stateResetters[$key] = $reset;
     }
 
     /**
@@ -153,13 +196,13 @@ final class Quittio
 
         $levels = $config->validationLevels;
         $phpLevels = array_values(array_filter($levels, static fn (ValidationLevel $l): bool => in_array($l, [ValidationLevel::L1, ValidationLevel::L2, ValidationLevel::L3, ValidationLevel::L7], true)));
-        $quittio->withValidator(new PhpRulesDriver(levels: $phpLevels));
+        $quittio->addValidator(new PhpRulesDriver(levels: $phpLevels));
         if (in_array(ValidationLevel::L4, $levels, true)) {
-            $quittio->withValidator(new XsdValidator);
+            $quittio->addValidator(new XsdValidator);
         }
         if ($config->kosit !== null) {
             $k = $config->kosit;
-            $quittio->withValidator(new KositValidator(
+            $quittio->addValidator(new KositValidator(
                 mode: $k['mode'] ?? KositValidator::MODE_DAEMON,
                 url: $k['url'] ?? 'http://127.0.0.1:8081',
                 jar: $k['jar'] ?? null,
@@ -171,7 +214,7 @@ final class Quittio
         }
         if ($config->veraPdf !== null) {
             $v = $config->veraPdf;
-            $quittio->withValidator(new VeraPdfValidator(
+            $quittio->addValidator(new VeraPdfValidator(
                 mode: $v['mode'] ?? VeraPdfValidator::MODE_DOCKER,
                 binary: $v['binary'] ?? 'verapdf',
                 image: $v['image'] ?? 'verapdf/cli',
@@ -184,6 +227,12 @@ final class Quittio
         return $quittio;
     }
 
+    /**
+     * Starts a render call: format(), profile(), locale() … and render(). A builder is built and a
+     * model converted (ProvidesInvoiceData) at once.
+     *
+     * @throws InvalidInvoiceData when a builder misses an essential part (see InvoiceBuilder::build())
+     */
     public function make(InvoiceData|ProvidesInvoiceData|InvoiceBuilder $data): PendingInvoice
     {
         $invoice = match (true) {
@@ -212,6 +261,7 @@ final class Quittio
         $locale = $original->meta->locale ?? $this->config->locale ?? $pack->defaults()->locale;
 
         return Cancellation::of(
+            calculator: $this->calculator,
             original: $original,
             number: $number,
             strategy: $strategy ?? $this->config->cancellationStrategy ?? $policy->cancellationStrategy,
@@ -225,6 +275,10 @@ final class Quittio
         );
     }
 
+    /**
+     * Starts the render call of a quote, order confirmation, delivery note, proforma invoice,
+     * payment reminder or account statement.
+     */
     public function document(DocumentData $document): PendingDocument
     {
         return new PendingDocument($this, $document);
@@ -232,6 +286,10 @@ final class Quittio
 
     /**
      * Reads an incoming XML or PDF e-invoice from its content (bytes), never from a path.
+     *
+     * @throws UnsafeXmlException when the XML is too large, not well-formed or not allowed (DOCTYPE, limits)
+     * @throws PdfException when the PDF is too large, encrypted, malformed or exceeds a limit
+     * @throws UnreadableInvoiceException for an unknown format, ZUGFeRD 1.0 or a PDF without an embedded invoice
      */
     public function read(string $content): ReadResult
     {
@@ -240,6 +298,10 @@ final class Quittio
 
     /**
      * Reads an incoming XML or PDF e-invoice from a file.
+     *
+     * @throws UnsafeXmlException when the XML is too large, not well-formed or not allowed (DOCTYPE, limits)
+     * @throws PdfException when the PDF is too large, encrypted, malformed or exceeds a limit
+     * @throws UnreadableInvoiceException for an unknown format, ZUGFeRD 1.0, a PDF without an embedded invoice, or a file that cannot be read
      */
     public function readFile(string $path): ReadResult
     {
@@ -248,6 +310,10 @@ final class Quittio
 
     /**
      * Reads and validates an incoming XML or PDF e-invoice (content, never a path) with all configured levels.
+     *
+     * @throws UnsafeXmlException when the XML is too large, not well-formed or not allowed (DOCTYPE, limits)
+     * @throws PdfException when the PDF is too large, encrypted, malformed or exceeds a limit
+     * @throws UnreadableInvoiceException for an unknown format, ZUGFeRD 1.0 or a PDF without an embedded invoice
      */
     public function validateFile(string $content): ValidationResult
     {
@@ -256,6 +322,10 @@ final class Quittio
 
     /**
      * Reads and validates an incoming XML or PDF e-invoice from a file with all configured levels.
+     *
+     * @throws UnsafeXmlException when the XML is too large, not well-formed or not allowed (DOCTYPE, limits)
+     * @throws PdfException when the PDF is too large, encrypted, malformed or exceeds a limit
+     * @throws UnreadableInvoiceException for an unknown format, ZUGFeRD 1.0, a PDF without an embedded invoice, or a file that cannot be read
      */
     public function validatePath(string $path): ValidationResult
     {
@@ -315,6 +385,20 @@ final class Quittio
         return $result;
     }
 
+    /**
+     * The render run behind PendingInvoice::render(): calculates the data, applies the configured
+     * defaults, chooses formats and profiles, validates, writes the XML, renders the template and the
+     * PDF/A with the embedded XML. Returns the result of the first format; the others are reachable
+     * with as().
+     *
+     * @throws ValidationException when validation finds errors in the mode "error"
+     * @throws ConfigurationException for an unknown format, a profile the format does not support or a
+     *         watermark with e-invoice XML
+     * @throws MandatoryFieldMissing when the template omits mandatory values in the guard mode "exception"
+     * @throws CalculationException when the data cannot be calculated
+     * @throws InvalidInvoiceData when a text cannot be written to XML (control characters, invalid UTF-8)
+     * @throws PdfException when the PDF cannot be rendered or post-processed
+     */
     public function render(InvoiceData $data, RenderOptions $options = new RenderOptions): RenderedInvoice
     {
         $invoice = $this->calculator->calculate($this->withDefaults($data));
@@ -339,6 +423,9 @@ final class Quittio
      * An explicit validation request: it validates whatever the validation mode of the
      * configuration or the call (also "off" and withoutValidation()) and returns the result
      * without throwing a ValidationException.
+     *
+     * @throws ConfigurationException for an unknown format or a profile the format does not support
+     * @throws CalculationException when the data cannot be calculated
      */
     public function check(InvoiceData $data, RenderOptions $options = new RenderOptions): ValidationResult
     {
@@ -357,6 +444,9 @@ final class Quittio
      * whatever the validation mode (also "off" and withoutValidation()), and never throws a
      * ValidationException: the caller decides on the result. Configuration errors (e.g. an
      * unsupported profile) still throw.
+     *
+     * @throws ConfigurationException for an unknown format or a profile the format does not support
+     * @throws CalculationException when the data cannot be calculated
      */
     public function prepare(InvoiceData $data, RenderOptions $options = new RenderOptions): PreparedInvoice
     {
@@ -381,6 +471,14 @@ final class Quittio
         return new PreparedInvoice($invoice, $formats, $countries->leading, $countries->buyer, $locale, $result);
     }
 
+    /**
+     * The render run behind PendingDocument::render(): calculates the document and renders
+     * the template and, unless the format "html" is requested, the PDF. Documents carry no XML and are
+     * not validated.
+     *
+     * @throws CalculationException when the document cannot be calculated
+     * @throws PdfException when the PDF cannot be rendered
+     */
     public function renderDocument(DocumentData $document, RenderOptions $options = new RenderOptions): RenderedDocument
     {
         $document = (new DocumentCalculator($this->calculator))->calculate($document);
@@ -404,6 +502,10 @@ final class Quittio
         return new RenderedDocument($document, $html, $this->filenamePattern($view->title(), $document->number, $document->issueDate->toIsoString(), $document->type->value), $pdf);
     }
 
+    /**
+     * Registers a country pack with its profiles and translations; a pack with the same code
+     * replaces the earlier one. Changes this instance.
+     */
     public function registerCountry(CountryPack $pack): self
     {
         $this->countries->register($pack);
@@ -430,35 +532,51 @@ final class Quittio
         return $this;
     }
 
-    public function withSerializer(XmlSerializer $serializer): self
+    /**
+     * Writes the XML of the serializer's syntax with $serializer from now on (replaces the
+     * serializer of that syntax). Changes this instance.
+     */
+    public function addSerializer(XmlSerializer $serializer): self
     {
         $this->serializers[$serializer->syntax()->value] = $serializer;
 
         return $this;
     }
 
-    public function withValidator(ValidationDriver $driver): self
+    /**
+     * Runs $driver in every validation after the drivers added before. Changes this instance.
+     */
+    public function addValidator(ValidationDriver $driver): self
     {
         $this->validators[] = $driver;
 
         return $this;
     }
 
-    public function withoutValidators(): self
+    /**
+     * Removes every validation driver, e.g. before adding a custom set. Changes this instance.
+     */
+    public function clearValidators(): self
     {
         $this->validators = [];
 
         return $this;
     }
 
-    public function withRenderer(PdfRenderer $renderer): self
+    /**
+     * Renders PDFs with $renderer from now on. Changes this instance.
+     */
+    public function setRenderer(PdfRenderer $renderer): self
     {
         $this->renderer = $renderer;
 
         return $this;
     }
 
-    public function withTemplateEngine(TemplateEngine $templates): self
+    /**
+     * Renders the templates with $templates from now on. Changes this instance.
+     */
+    public function setTemplateEngine(TemplateEngine $templates): self
     {
         $this->templates = $templates;
 
@@ -467,37 +585,121 @@ final class Quittio
 
     /**
      * Payment QR code generator for the type "auto" (before the country pack's) and the type
-     * "swiss-qr-bill", for which Quittio ships no generator; null removes it.
+     * "swiss-qr-bill", for which Quittio ships no generator; null removes it. Changes this
+     * instance.
      */
-    public function withPaymentQrGenerator(?PaymentQrGenerator $generator): self
+    public function setPaymentQrGenerator(?PaymentQrGenerator $generator): self
     {
         $this->paymentQr = $generator;
 
         return $this;
     }
 
-    public function withFormatResolver(FormatResolver $resolver): self
+    /**
+     * Chooses formats and profiles with $resolver from now on. Changes this instance.
+     */
+    public function setFormatResolver(FormatResolver $resolver): self
     {
         $this->formatResolver = $resolver;
 
         return $this;
     }
 
+    /**
+     * Adds PDF/A and the embedded XML to the PDFs of renderers that cannot do it themselves
+     * (PdfRenderer::supportsEmbedding()); null = MpdfPostProcessor with the configured temp_dir.
+     * Changes this instance.
+     */
+    public function setPostProcessor(?PdfPostProcessor $postProcessor): self
+    {
+        $this->postProcessor = $postProcessor;
+
+        return $this;
+    }
+
+    /**
+     * @deprecated use addSerializer(); like it, it changes this instance
+     */
+    public function withSerializer(XmlSerializer $serializer): self
+    {
+        return $this->addSerializer($serializer);
+    }
+
+    /**
+     * @deprecated use addValidator(); like it, it changes this instance
+     */
+    public function withValidator(ValidationDriver $driver): self
+    {
+        return $this->addValidator($driver);
+    }
+
+    /**
+     * @deprecated use clearValidators(); like it, it changes this instance
+     */
+    public function withoutValidators(): self
+    {
+        return $this->clearValidators();
+    }
+
+    /**
+     * @deprecated use setRenderer(); like it, it changes this instance
+     */
+    public function withRenderer(PdfRenderer $renderer): self
+    {
+        return $this->setRenderer($renderer);
+    }
+
+    /**
+     * @deprecated use setTemplateEngine(); like it, it changes this instance
+     */
+    public function withTemplateEngine(TemplateEngine $templates): self
+    {
+        return $this->setTemplateEngine($templates);
+    }
+
+    /**
+     * @deprecated use setPaymentQrGenerator(); like it, it changes this instance
+     */
+    public function withPaymentQrGenerator(?PaymentQrGenerator $generator): self
+    {
+        return $this->setPaymentQrGenerator($generator);
+    }
+
+    /**
+     * @deprecated use setFormatResolver(); like it, it changes this instance
+     */
+    public function withFormatResolver(FormatResolver $resolver): self
+    {
+        return $this->setFormatResolver($resolver);
+    }
+
+    /**
+     * The configuration of this instance.
+     */
     public function config(): Config
     {
         return $this->config;
     }
 
+    /**
+     * The registered profiles, those of the country packs included.
+     */
     public function profiles(): ProfileRegistry
     {
         return $this->profiles;
     }
 
+    /**
+     * The registered country packs.
+     */
     public function countries(): CountryRegistry
     {
         return $this->countries;
     }
 
+    /**
+     * The output formats (zugferd, xrechnung-cii, ubl, pdf, html, json …).
+     */
     public function formats(): FormatRegistry
     {
         return $this->formats;
@@ -644,8 +846,8 @@ final class Quittio
                     filename: $filename,
                     relationship: $profile->afRelationship() ?? 'Alternative',
                     conformanceLevel: $profile->xmpConformanceLevel(),
-                    description: $filename === 'xrechnung.xml' ? 'XRechnung Invoice' : 'Factur-X/ZUGFeRD Invoice',
-                    version: self::xmpVersion($profile),
+                    description: $profile instanceof DescribesEmbeddedXml ? $profile->xmpDescription() : 'Factur-X/ZUGFeRD Invoice',
+                    version: $profile instanceof DescribesEmbeddedXml ? $profile->xmpVersion() : '1.0',
                 );
                 $pdf = $this->renderPdf(new RenderRequest(
                     html: $html,
@@ -707,7 +909,7 @@ final class Quittio
             throw new PdfException(sprintf('The PDF renderer %s did not return a PDF.', $this->renderer::class));
         }
 
-        return (new MpdfPostProcessor)->process($pdf, $request->embedded, $request->title, $request->author);
+        return ($this->postProcessor ?? new MpdfPostProcessor($this->config->tempDir))->process($pdf, $request->embedded, $request->title, $request->author);
     }
 
     /**
@@ -762,19 +964,6 @@ final class Quittio
         $explicit = $options->options['paper'] ?? $this->config->options['paper'] ?? null;
 
         return is_string($explicit) && $explicit !== '' ? $explicit : $pack->defaults()->paper;
-    }
-
-    /**
-     * fx:Version of the XMP metadata: "1.0" for the Factur-X profiles, the XRechnung version
-     * (e.g. "3.0") for the ZUGFeRD conformance level XRECHNUNG.
-     */
-    private static function xmpVersion(Profile $profile): string
-    {
-        if ($profile->xmpConformanceLevel() === 'XRECHNUNG' && preg_match('/xrechnung_(\d+\.\d+)/', $profile->specificationId(), $match) === 1) {
-            return $match[1];
-        }
-
-        return '1.0';
     }
 
     /**

@@ -389,6 +389,10 @@ return [
     'QUITTIO-THIRD-PARTY-PAYMENTS' => [
         'message' => 'Third party payments (BG-DEX-09) can only be transmitted in an XRechnung UBL invoice (XRechnung extension). In CII, in credit notes and in other profiles the amount due (BT-115) would contradict BR-CO-16. Use XRechnung UBL with an invoice type code (cancellations: strategy negative_invoice) or invoice the amounts as lines.',
     ],
+    'QUITTIO-CREDIT-NOTE-DUE-DATE' => [
+        'message' => 'A UBL credit note transmits the payment due date (BT-9) only with payment instructions (BG-16); the due date :value is left out.',
+        'hint' => 'Add payment instructions with ->payment(), or rely on the payment terms (BT-20).',
+    ],
     'QUITTIO-VAT-ROUNDING' => [
         'message' => 'The VAT amount of category :category (:rate %) differs from taxable amount × rate by :value. The official rules tolerate this, but the amount is not rounded commercially.',
     ],
@@ -403,6 +407,10 @@ return [
     ],
     'QUITTIO-ATTACHMENT-SIZE' => [
         'message' => 'Attached documents exceed the size limit (:value bytes). Receiving portals reject large invoices.',
+    ],
+    'QUITTIO-INVALID-CHARACTERS' => [
+        'message' => 'The text in :value contains control characters or invalid UTF-8, which XML cannot represent.',
+        'hint' => 'Remove control characters such as vertical tabs from text copied out of spreadsheets, and pass text in UTF-8.',
     ],
     'QUITTIO-GENERIC-COUNTRY' => [
         'message' => 'No country pack is installed for the seller country :value. Only EN 16931 rules are checked; national mandatory information is not validated.',

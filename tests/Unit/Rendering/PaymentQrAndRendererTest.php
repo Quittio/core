@@ -57,7 +57,7 @@ it('refuses the Swiss QR bill without a generator instead of leaving the code ou
 })->throws(ConfigurationException::class, 'needs a generator');
 
 it('uses a registered payment QR generator', function () {
-    $html = Quittio::create()->withPaymentQrGenerator(new FixedQrGenerator)->make(swissInvoice())->format('html')->render()->html();
+    $html = Quittio::create()->setPaymentQrGenerator(new FixedQrGenerator)->make(swissInvoice())->format('html')->render()->html();
 
     expect($html)->toContain('data:image/png;base64');
 });
@@ -67,4 +67,23 @@ it('adds PDF/A and the XML for renderers that cannot embed', function () {
 
     expect((new PdfEmbeddedFileExtractor)->extract((string) $pdf))->not->toBeNull()
         ->and((string) $pdf)->toContain('pdfaid:part');
+});
+
+it('post-processes in the configured temporary directory', function () {
+    $dir = sys_get_temp_dir().'/quittio-test-'.bin2hex(random_bytes(4));
+
+    try {
+        Quittio::create(['temp_dir' => $dir], renderer: new PlainPdfRenderer)->make(Invoices::simple()->build())->format('zugferd')->render();
+
+        expect(glob($dir.'/*'))->not->toBe([]);
+    } finally {
+        if (! is_dir($dir)) {
+            return;
+        }
+        $entries = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
+        foreach ($entries as $entry) {
+            $entry->isDir() ? rmdir($entry->getPathname()) : unlink($entry->getPathname());
+        }
+        rmdir($dir);
+    }
 });

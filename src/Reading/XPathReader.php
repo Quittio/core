@@ -12,11 +12,17 @@ use DOMDocument;
 use DOMElement;
 use DOMNode;
 use DOMXPath;
-use InvalidArgumentException;
 use Quittio\Core\Codes\CodeList;
 use Quittio\Core\Codes\RawCode;
+use Quittio\Core\Data\AllowanceCharge\DocumentAllowance;
+use Quittio\Core\Data\AllowanceCharge\DocumentCharge;
+use Quittio\Core\Enums\AllowanceReasonCode;
+use Quittio\Core\Enums\ChargeReasonCode;
+use Quittio\Core\Enums\VatCategory;
+use Quittio\Core\Exceptions\InvalidArgumentException;
 use Quittio\Core\Support\Amount;
 use Quittio\Core\Support\Date;
+use Quittio\Core\Support\Decimal;
 use Quittio\Core\Validation\Severity;
 use Quittio\Core\Validation\ValidationLevel;
 use Quittio\Core\Validation\ValidationMessage;
@@ -24,6 +30,8 @@ use Throwable;
 
 /**
  * Base class for XML readers: XPath access, tolerant value conversion and findings.
+ *
+ * @internal
  */
 abstract class XPathReader
 {
@@ -123,8 +131,110 @@ abstract class XPathReader
     }
 
     /**
+     * Reads a ChargeIndicator (xs:boolean): true for a charge, false for an allowance, null when it is missing or
+     * has another value. xs:boolean allows "true", "false", "1" and "0" with surrounding white space.
+     */
+    protected function chargeIndicator(DOMNode $context, string $path): ?bool
+    {
+        return match ($this->value($context, $path)) {
+            'true', '1' => true,
+            'false', '0' => false,
+            default => null,
+        };
+    }
+
+    /**
+     * Reports an allowance or charge whose ChargeIndicator is missing or invalid; the entry is not read.
+     *
+     * @param  string  $group  BG-20 for the document level, BG-27 for lines
+     */
+    protected function invalidChargeIndicator(DOMNode $context, string $path, string $group): void
+    {
+        $this->finding('QUITTIO-READER-CHARGE-INDICATOR', sprintf(
+            'An allowance or charge (%s) has the charge indicator "%s" instead of true or false and was not read.',
+            $group === 'BG-27' ? 'BG-27/BG-28' : 'BG-20/BG-21',
+            self::excerpt($this->value($context, $path) ?? ''),
+        ), $group, Severity::Error);
+    }
+
+    /**
      * Strict ISO date (UBL xs:date: YYYY-MM-DD with optional time zone).
      */
+    /**
+     * Document level allowances (BG-20) among the nodes $paths['node'] of $parent; $paths names
+     * the elements of the syntax relative to one node.
+     *
+     * @param  array{node: string, indicator: string, amount: string, category: string, rate: string, base: string, percent: string, reason: string, reasonCode: string}  $paths
+     * @return list<DocumentAllowance>
+     */
+    protected function documentAllowances(DOMNode $parent, array $paths): array
+    {
+        $result = [];
+        foreach ($this->nodes($parent, $paths['node']) as $node) {
+            if ($this->chargeIndicator($node, $paths['indicator']) !== false) {
+                continue;
+            }
+            $result[] = new DocumentAllowance(
+                amount: $this->money($this->value($node, $paths['amount']), $this->currency, 'BT-92'),
+                vatCategory: $this->category($this->value($node, $paths['category']), 'BT-95'),
+                vatRate: $this->decimal($this->value($node, $paths['rate']), 'BT-96'),
+                baseAmount: $this->money($this->value($node, $paths['base']), $this->currency, 'BT-93'),
+                percent: $this->decimal($this->value($node, $paths['percent']), 'BT-94'),
+                reason: $this->value($node, $paths['reason']),
+                reasonCode: $this->code($this->value($node, $paths['reasonCode']), AllowanceReasonCode::class, 'BT-98'),
+            );
+        }
+
+        return $result;
+    }
+
+    /**
+     * Document level charges (BG-21), see documentAllowances(). Entries without a valid charge
+     * indicator are reported here (and skipped by both).
+     *
+     * @param  array{node: string, indicator: string, amount: string, category: string, rate: string, base: string, percent: string, reason: string, reasonCode: string}  $paths
+     * @return list<DocumentCharge>
+     */
+    protected function documentCharges(DOMNode $parent, array $paths): array
+    {
+        $result = [];
+        foreach ($this->nodes($parent, $paths['node']) as $node) {
+            $isCharge = $this->chargeIndicator($node, $paths['indicator']);
+            if ($isCharge === null) {
+                $this->invalidChargeIndicator($node, $paths['indicator'], 'BG-20');
+            }
+            if ($isCharge !== true) {
+                continue;
+            }
+            $result[] = new DocumentCharge(
+                amount: $this->money($this->value($node, $paths['amount']), $this->currency, 'BT-99'),
+                vatCategory: $this->category($this->value($node, $paths['category']), 'BT-102'),
+                vatRate: $this->decimal($this->value($node, $paths['rate']), 'BT-103'),
+                baseAmount: $this->money($this->value($node, $paths['base']), $this->currency, 'BT-100'),
+                percent: $this->decimal($this->value($node, $paths['percent']), 'BT-101'),
+                reason: $this->value($node, $paths['reason']),
+                reasonCode: $this->code($this->value($node, $paths['reasonCode']), ChargeReasonCode::class, 'BT-105'),
+            );
+        }
+
+        return $result;
+    }
+
+    /**
+     * The VAT category of a code; an unknown code is reported and read as "S".
+     */
+    protected function category(?string $value, string $bt): VatCategory
+    {
+        $category = $value === null ? null : VatCategory::tryFrom($value);
+        if ($category === null) {
+            $this->finding('QUITTIO-READER-VAT-CATEGORY', sprintf('The VAT category code "%s" (%s) is unknown; "S" is assumed.', $value ?? '', $bt), $bt, Severity::Error);
+
+            return VatCategory::StandardRate;
+        }
+
+        return $category;
+    }
+
     protected function date(?string $value, string $bt): ?Date
     {
         if ($value === null) {
@@ -192,7 +302,7 @@ abstract class XPathReader
 
         // xs:decimal only: no exponents (1e9999999 would expand to millions of digits), no
         // thousands separators, a bounded number of digits.
-        if (strlen($value) > self::MAX_NUMBER_LENGTH || preg_match('/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/', $value) !== 1) {
+        if (strlen($value) > self::MAX_NUMBER_LENGTH || ! Decimal::isPlain($value)) {
             $this->finding('QUITTIO-READER-NUMBER', sprintf('The number "%s" (%s) is not a valid decimal number and was not read.', self::excerpt($value), $bt), $bt, Severity::Error);
 
             return null;

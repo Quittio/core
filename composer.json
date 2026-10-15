@@ -44,6 +44,12 @@
         "psr/log": "^3.0",
         "setasign/fpdi": "^2.6"
     },
+    "require-dev": {
+        "opis/json-schema": "^2.6",
+        "pestphp/pest": "^4.7 || ^5.0",
+        "quittio/country-de": "self.version",
+        "spatie/pest-plugin-snapshots": "^2.2"
+    },
     "suggest": {
         "ext-intl": "Locale-aware number and date formatting",
         "ext-zip": "Unpack the KoSIT validator configuration (quittio:schemas:download)",
@@ -64,7 +70,16 @@
     "minimum-stability": "stable",
     "extra": {
         "branch-alias": {
-            "dev-master": "0.1.x-dev"
+            "dev-master": "0.2.x-dev"
+        }
+    },
+    "scripts": {
+        "test": "pest"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
         }
     }
 }

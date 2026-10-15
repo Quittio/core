@@ -135,6 +135,20 @@ it('saves to a directory with the configured file name', function () {
         ->and(file_get_contents($path))->toStartWith('<?xml');
 });
 
+it('saves into a new directory given with a trailing slash', function () {
+    $dir = sys_get_temp_dir().'/quittio-save-'.bin2hex(random_bytes(4)).'/2026/';
+    $path = quittio()->make(Invoices::simple())->format('cii')->render()->save($dir);
+
+    expect($path)->toStartWith($dir)->toEndWith('.xml')
+        ->and(is_file($path))->toBeTrue();
+});
+
+it('throws when the file cannot be written', function () {
+    $file = tempnam(sys_get_temp_dir(), 'quittio');
+
+    quittio()->make(Invoices::simple())->format('cii')->render()->save($file.'/invoice.xml');
+})->throws(RuntimeException::class, 'Unable to create the directory');
+
 it('reads and validates incoming files', function () {
     $quittio = quittio();
     $pdf = $quittio->make(Invoices::simple())->format('zugferd')->render()->pdf();
@@ -259,7 +273,7 @@ it('keeps the VAT identifier verifier when the rules run for formats without XML
             return new VatIdVerification($vatId, false);
         }
     };
-    $quittio = quittio()->withoutValidators()->withValidator(new PhpRulesDriver(vatIdVerifier: $verifier));
+    $quittio = quittio()->clearValidators()->addValidator(new PhpRulesDriver(vatIdVerifier: $verifier));
     $result = $quittio->make(Invoices::simple())->format('pdf')->validate(throwOnError: false)->render();
 
     expect($verifier->checked)->not->toBeEmpty()
@@ -309,7 +323,7 @@ it('checks and prepares the XML that pdf embeds with b2c_embed_xml, exactly as r
             return new ValidationResult([new ValidationMessage(Severity::Info, 'TEST-XML', 'XML checked', ValidationLevel::L5)], [ValidationLevel::L5]);
         }
     };
-    $quittio = quittio(['pdf' => ['b2c_embed_xml' => true]])->withValidator($recorder);
+    $quittio = quittio(['pdf' => ['b2c_embed_xml' => true]])->addValidator($recorder);
     $consumer = buyerIn('DE', consumer: true);
 
     $prepared = $quittio->make($consumer)->format('pdf')->prepare();
@@ -358,4 +372,13 @@ it('reads every documented key of the core configuration array', function () {
         ->and([$config->validation, $config->validationLevels, $config->blockOnWarnings, $config->veraPdf])->toBe([Config::VALIDATION_OFF, [ValidationLevel::L1], true, ['mode' => 'cli']])
         ->and([$config->mandatoryFields, $config->tempDir, $config->options, $config->presentation?->paper])->toBe(['log', '/tmp/quittio', ['fold_marks' => true], 'Letter'])
         ->and([$config->maxXmlBytes, $config->maxPdfBytes, $config->maxDecompressedBytes, $config->cancellationStrategy])->toBe([1, 2, 3, 'negative_invoice']);
+});
+
+it('keeps the deprecated with methods as aliases that change the instance', function () {
+    $quittio = new Quittio;
+    $driver = new PhpRulesDriver;
+
+    expect($quittio->withoutValidators())->toBe($quittio)
+        ->and($quittio->withValidator($driver)->validators())->toBe([$driver])
+        ->and($quittio->clearValidators()->addValidator($driver)->validators())->toBe([$driver]);
 });
