@@ -7,15 +7,24 @@ namespace Quittio\Core\Builder;
 use Brick\Math\BigDecimal;
 use Brick\Money\Money;
 use Closure;
-use DateTimeInterface;
+use Quittio\Core\Builder\Concerns\BuildsAllowancesAndCharges;
+use Quittio\Core\Builder\Concerns\BuildsDelivery;
+use Quittio\Core\Builder\Concerns\BuildsExtensions;
+use Quittio\Core\Builder\Concerns\BuildsHeader;
+use Quittio\Core\Builder\Concerns\BuildsLines;
+use Quittio\Core\Builder\Concerns\BuildsNotesAndAttachments;
+use Quittio\Core\Builder\Concerns\BuildsParties;
+use Quittio\Core\Builder\Concerns\BuildsPayment;
+use Quittio\Core\Builder\Concerns\BuildsPresentationAndMeta;
+use Quittio\Core\Builder\Concerns\BuildsReferences;
 use Quittio\Core\Calculation\AllowanceSplitter;
 use Quittio\Core\Calculation\CalculationException;
 use Quittio\Core\Calculation\DeclaredAmounts;
+use Quittio\Core\Calculation\En16931Calculator;
 use Quittio\Core\Calculation\LargestRemainder;
 use Quittio\Core\Calculation\LineCalculator;
+use Quittio\Core\Calculation\TotalsCalculator;
 use Quittio\Core\Codes\RawCode;
-use Quittio\Core\Contracts\ProvidesInvoiceLine;
-use Quittio\Core\Contracts\ProvidesParty;
 use Quittio\Core\Data\AllowanceCharge\DocumentAllowance;
 use Quittio\Core\Data\AllowanceCharge\DocumentAllowanceCharge;
 use Quittio\Core\Data\AllowanceCharge\DocumentCharge;
@@ -31,17 +40,12 @@ use Quittio\Core\Data\Lines\InvoiceLine;
 use Quittio\Core\Data\Lines\LineVat;
 use Quittio\Core\Data\Meta;
 use Quittio\Core\Data\Note;
-use Quittio\Core\Data\Party\Address;
 use Quittio\Core\Data\Party\BuyerParty;
 use Quittio\Core\Data\Party\PayeeParty;
 use Quittio\Core\Data\Party\SellerParty;
 use Quittio\Core\Data\Party\TaxRepresentativeParty;
-use Quittio\Core\Data\Payment\CreditTransfer;
-use Quittio\Core\Data\Payment\DirectDebit;
-use Quittio\Core\Data\Payment\PaymentCard;
 use Quittio\Core\Data\Payment\PaymentInstructions;
 use Quittio\Core\Data\Payment\PaymentTerms;
-use Quittio\Core\Data\Presentation\LineGroup;
 use Quittio\Core\Data\Presentation\Presentation;
 use Quittio\Core\Data\References\PrecedingInvoiceReference;
 use Quittio\Core\Data\References\ProjectReference;
@@ -50,22 +54,17 @@ use Quittio\Core\Documents\DocumentData;
 use Quittio\Core\Documents\DocumentType;
 use Quittio\Core\Enums\AllowanceReasonCode;
 use Quittio\Core\Enums\ChargeReasonCode;
-use Quittio\Core\Enums\IdentifierScheme;
 use Quittio\Core\Enums\InvoiceTypeCode;
-use Quittio\Core\Enums\MimeType;
-use Quittio\Core\Enums\NoteSubjectCode;
-use Quittio\Core\Enums\PaymentMeansCode;
 use Quittio\Core\Enums\TaxPointDateCode;
-use Quittio\Core\Enums\UnitCode;
 use Quittio\Core\Enums\VatCategory;
 use Quittio\Core\Enums\VatExemptionReasonCode;
-use Quittio\Core\Exceptions\InvalidArgumentException;
 use Quittio\Core\Exceptions\InvalidInvoiceData;
 use Quittio\Core\Standards\StandardVersion;
 use Quittio\Core\Support\Amount;
 use Quittio\Core\Support\Date;
 use Quittio\Core\Support\Decimal;
 use Quittio\Core\Support\Macroable;
+use Quittio\Core\Tax\SupplyDate;
 use Quittio\Core\Tax\TaxPreset;
 use ReflectionClass;
 use Throwable;
@@ -78,6 +77,16 @@ use Throwable;
  */
 class InvoiceBuilder
 {
+    use BuildsAllowancesAndCharges;
+    use BuildsDelivery;
+    use BuildsExtensions;
+    use BuildsHeader;
+    use BuildsLines;
+    use BuildsNotesAndAttachments;
+    use BuildsParties;
+    use BuildsPayment;
+    use BuildsPresentationAndMeta;
+    use BuildsReferences;
     use Macroable;
 
     /** Payment means codes (UNTDID 4461) of credit transfers, payment cards and direct debits. */
@@ -202,8 +211,20 @@ class InvoiceBuilder
      * by the calculator (Meta::FLAG_DECLARED_AMOUNTS with a fingerprint of the amount inputs).
      * Data flagged earlier whose amount inputs no longer match its fingerprint (e.g. changed with
      * with() or in stored JSON) is treated as changed lines and recalculated.
+     *
+     * The declared amounts are compared with the result of the default En16931Calculator; use
+     * fromUsing() or Quittio::edit() to compare with another calculator.
      */
     public static function from(InvoiceData $data): static
+    {
+        return static::fromUsing($data, new En16931Calculator);
+    }
+
+    /**
+     * Like from(), with the calculator that decides whether the declared amounts of the data
+     * differ from a recalculation, e.g. the calculator of the Quittio instance.
+     */
+    public static function fromUsing(InvoiceData $data, TotalsCalculator $calculator): static
     {
         $builder = new static;
         $builder->number = $data->number;
@@ -248,7 +269,7 @@ class InvoiceBuilder
         $builder->meta = $withRate->meta;
         $builder->impliedExchangeRate = $data->meta->exchangeRate === null && $withRate->meta->exchangeRate !== null;
         $stale = DeclaredAmounts::isStale($data);
-        $builder->declaredAmounts = ! $stale && DeclaredAmounts::needed($data);
+        $builder->declaredAmounts = ! $stale && DeclaredAmounts::needed($data, $calculator);
         $builder->linesChanged = $stale;
         $builder->declaredBreakdown = $data->vatBreakdown;
         $builder->declaredCurrency = $data->currency;
@@ -304,915 +325,6 @@ class InvoiceBuilder
     private array $derivedChargeBases = [];
 
     private bool $linesChanged = false;
-
-    /**
-     * Invoice number (BT-1). Not checked here; the validation requires it.
-     */
-    public function number(string $number): static
-    {
-        $this->number = $number;
-
-        return $this;
-    }
-
-    /**
-     * Issue date (BT-2); default today. A DateTimeInterface is converted in the time zone of
-     * timezone(), so call timezone() first.
-     */
-    public function issueDate(Date|DateTimeInterface|string $date): static
-    {
-        $this->issueDate = Date::parse($date, $this->meta->timezone);
-
-        return $this;
-    }
-
-    /**
-     * Type code (BT-3) from UNTDID 1001, e.g. 381 for a credit note; default 380. Unknown
-     * codes are kept as RawCode and reported by the validation.
-     */
-    public function type(InvoiceTypeCode|RawCode|string $type): static
-    {
-        $this->typeCode = is_string($type) ? (InvoiceTypeCode::tryFrom($type) ?? new RawCode($type)) : $type;
-
-        return $this;
-    }
-
-    /**
-     * Invoice currency (BT-5), ISO 4217; stored in upper case. Default EUR.
-     */
-    public function currency(string $currency): static
-    {
-        $this->currency = strtoupper($currency);
-
-        return $this;
-    }
-
-    /**
-     * VAT accounting currency (BT-6). With an exchange rate, BT-111 is calculated.
-     */
-    public function taxCurrency(string $currency, BigDecimal|int|float|string|null $exchangeRate = null, Date|DateTimeInterface|string|null $rateDate = null): static
-    {
-        $this->taxCurrency = strtoupper($currency);
-        if ($exchangeRate !== null) {
-            $this->exchangeRate($exchangeRate, $rateDate);
-        }
-
-        return $this;
-    }
-
-    /**
-     * Exchange rate from the invoice currency to the VAT accounting currency (BT-6), used to
-     * calculate the VAT total in that currency (BT-111), with the date of the rate. Replaces a rate
-     * implied by declared amounts (see from()).
-     *
-     * @throws InvalidArgumentException for a float
-     */
-    public function exchangeRate(BigDecimal|int|float|string $rate, Date|DateTimeInterface|string|null $date = null): static
-    {
-        $this->impliedExchangeRate = false;
-        $this->meta = $this->meta->with([
-            'exchangeRate' => Decimal::of($rate),
-            'exchangeRateDate' => $date === null ? null : Date::parse($date),
-        ]);
-
-        return $this;
-    }
-
-    /**
-     * Date when VAT becomes chargeable (BT-7), if it differs from the issue date. EN 16931
-     * allows BT-7 or BT-8, not both (BR-CO-03).
-     */
-    public function taxPointDate(Date|DateTimeInterface|string $date): static
-    {
-        $this->taxPointDate = Date::parse($date, $this->meta->timezone);
-
-        return $this;
-    }
-
-    /**
-     * Code of the date when VAT becomes chargeable (BT-8): issue, delivery or payment date.
-     * EN 16931 allows BT-7 or BT-8, not both (BR-CO-03).
-     */
-    public function taxPointDateCode(TaxPointDateCode $code): static
-    {
-        $this->taxPointDateCode = $code;
-
-        return $this;
-    }
-
-    /**
-     * Due date (BT-9). Without it the calculator derives it from dueInDays(); otherwise the
-     * configured due_days apply when rendering, never for credit notes.
-     */
-    public function dueDate(Date|DateTimeInterface|string $date): static
-    {
-        $this->dueDate = Date::parse($date, $this->meta->timezone);
-
-        return $this;
-    }
-
-    /**
-     * Buyer reference (BT-10). For public sector buyers in Germany this is the Leitweg-ID.
-     */
-    public function buyerReference(?string $reference): static
-    {
-        return $this->reference('buyerReference', $reference);
-    }
-
-    /**
-     * Project reference (BT-11) with the project name, which CII requires in addition to the
-     * identifier.
-     */
-    public function projectReference(string $id, ?string $name = null): static
-    {
-        $this->projectReference = new ProjectReference($id, $name);
-
-        return $this;
-    }
-
-    /**
-     * Contract reference (BT-12); null removes it.
-     */
-    public function contractReference(?string $reference): static
-    {
-        return $this->reference('contractReference', $reference);
-    }
-
-    /**
-     * The buyer's purchase order reference (BT-13); null removes it.
-     */
-    public function purchaseOrderReference(?string $reference): static
-    {
-        return $this->reference('purchaseOrderReference', $reference);
-    }
-
-    /**
-     * The seller's sales order reference (BT-14); null removes it.
-     */
-    public function salesOrderReference(?string $reference): static
-    {
-        return $this->reference('salesOrderReference', $reference);
-    }
-
-    /**
-     * Receiving advice reference (BT-15); null removes it.
-     */
-    public function receivingAdviceReference(?string $reference): static
-    {
-        return $this->reference('receivingAdviceReference', $reference);
-    }
-
-    /**
-     * Despatch advice reference (BT-16); null removes it.
-     */
-    public function despatchAdviceReference(?string $reference): static
-    {
-        return $this->reference('despatchAdviceReference', $reference);
-    }
-
-    /**
-     * Tender or lot reference (BT-17); null removes it.
-     */
-    public function tenderReference(?string $reference): static
-    {
-        return $this->reference('tenderReference', $reference);
-    }
-
-    /**
-     * The buyer's accounting reference (BT-19), e.g. a cost centre; null removes it.
-     */
-    public function buyerAccountingReference(?string $reference): static
-    {
-        return $this->reference('buyerAccountingReference', $reference);
-    }
-
-    /**
-     * Identifier of the invoiced object (BT-18), e.g. a meter or subscription number, with
-     * its scheme (BT-18-1).
-     */
-    public function invoicedObject(string $value, string|RawCode|null $scheme = null): static
-    {
-        $this->invoicedObject = Identifier::of($value, $scheme);
-
-        return $this;
-    }
-
-    /**
-     * Adds an invoice note (BG-1): the text (BT-22) and an optional subject code (BT-21,
-     * UNTDID 4451, e.g. "REG" for regulatory information). Unknown codes are kept as RawCode.
-     */
-    public function note(string $content, NoteSubjectCode|RawCode|string|null $subject = null): static
-    {
-        $this->notes[] = new Note(
-            $content,
-            is_string($subject) ? (NoteSubjectCode::tryFrom($subject) ?? new RawCode($subject)) : $subject,
-        );
-
-        return $this;
-    }
-
-    /**
-     * Business process identifier (BT-23); Peppol and XRechnung write their process when it is
-     * not set. null removes it.
-     */
-    public function businessProcess(?string $process): static
-    {
-        $this->businessProcess = $process;
-
-        return $this;
-    }
-
-    /**
-     * Adds a reference to a preceding invoice (BG-3): its number (BT-25) and issue date
-     * (BT-26), e.g. for a corrected invoice or a credit note.
-     */
-    public function precedingInvoice(string $number, Date|DateTimeInterface|string|null $issueDate = null): static
-    {
-        $this->precedingInvoices[] = new PrecedingInvoiceReference($number, $issueDate === null ? null : Date::parse($issueDate));
-
-        return $this;
-    }
-
-    /**
-     * The seller (BG-4).
-     *
-     * A SellerParty, a PartyBuilder (Party::make()) or an application model (ProvidesParty)
-     * replaces the seller set before. If the builder was started with the defaults of a seller
-     * (applyDefaults(), e.g. Quittio::invoice() with the seller of config/quittio.php or the
-     * current Managed issuer), another seller gets nothing of them: everything they set is
-     * removed again, i.e. the bank account and the small business flag, for a Managed issuer
-     * also payment terms, presentation, locale, time zone and currency. Values the caller set
-     * on the builder stay, also when they were set before seller().
-     *
-     * A callable receives the builder of the seller set before and changes it, e.g.
-     * ->seller(fn ($s) => $s->contact('Max Muster')); the seller stays the same, and so do its
-     * defaults.
-     *
-     * @param  SellerParty|PartyBuilder|ProvidesParty|callable(PartyBuilder): mixed  $seller
-     */
-    public function seller(SellerParty|PartyBuilder|ProvidesParty|callable $seller): static
-    {
-        if ($seller instanceof SellerParty || $seller instanceof PartyBuilder || $seller instanceof ProvidesParty) {
-            $this->removeDefaults();
-            $this->seller = $seller instanceof SellerParty ? $seller : self::partyBuilder($seller);
-
-            return $this;
-        }
-
-        $builder = $this->seller instanceof SellerParty ? PartyBuilder::fromSeller($this->seller) : ($this->seller ?? new PartyBuilder);
-        $seller($builder);
-        $this->seller = $builder;
-
-        return $this;
-    }
-
-    /**
-     * The buyer (BG-7): a BuyerParty, a PartyBuilder (Party::make()) or an application model
-     * (ProvidesParty), e.g. ->buyer($customer), replace the buyer set before; a callable
-     * receives the builder of the buyer set before and changes it.
-     *
-     * @param  BuyerParty|PartyBuilder|ProvidesParty|callable(PartyBuilder): mixed  $buyer
-     */
-    public function buyer(BuyerParty|PartyBuilder|ProvidesParty|callable $buyer): static
-    {
-        if ($buyer instanceof BuyerParty || $buyer instanceof PartyBuilder || $buyer instanceof ProvidesParty) {
-            $this->buyer = $buyer instanceof BuyerParty ? $buyer : self::partyBuilder($buyer);
-
-            return $this;
-        }
-
-        $builder = $this->buyer instanceof BuyerParty ? PartyBuilder::fromBuyer($this->buyer) : ($this->buyer ?? new PartyBuilder);
-        $buyer($builder);
-        $this->buyer = $builder;
-
-        return $this;
-    }
-
-    /**
-     * Payee (BG-10), if different from the seller (e.g. a factoring company): the name with the
-     * identifier (BT-60) and the legal registration identifier (BT-61) and their schemes, a
-     * PartyBuilder (Party::make('Factoring AG')->identifier(…)), a PayeeParty, or a callable that
-     * receives a PartyBuilder and, like seller() and buyer(), continues an earlier payee.
-     *
-     * @param  PayeeParty|PartyBuilder|string|callable(PartyBuilder): mixed  $payee
-     *
-     * @throws InvalidArgumentException for identifiers or schemes next to a PayeeParty or a callable
-     */
-    public function payee(
-        PayeeParty|PartyBuilder|string|callable $payee,
-        ?string $identifier = null,
-        ?string $legalRegistration = null,
-        IdentifierScheme|RawCode|string|null $identifierScheme = null,
-        IdentifierScheme|RawCode|string|null $legalRegistrationScheme = null,
-    ): static {
-        if (is_string($payee)) {
-            $this->payee = new PayeeParty(
-                $payee,
-                $identifier === null ? null : Identifier::of($identifier, $identifierScheme),
-                $legalRegistration === null ? null : Identifier::of($legalRegistration, $legalRegistrationScheme),
-            );
-
-            return $this;
-        }
-        if ($identifier !== null || $legalRegistration !== null || $identifierScheme !== null || $legalRegistrationScheme !== null) {
-            throw new InvalidArgumentException('Identifiers and schemes of the payee are given with its name only; set them on the PayeeParty or with the PartyBuilder of the callable.');
-        }
-        if ($payee instanceof PayeeParty) {
-            $this->payee = $payee;
-
-            return $this;
-        }
-        if ($payee instanceof PartyBuilder) {
-            $this->payee = clone $payee;
-
-            return $this;
-        }
-
-        $builder = $this->payee instanceof PayeeParty ? PartyBuilder::fromPayee($this->payee) : ($this->payee ?? new PartyBuilder);
-        $payee($builder);
-        $this->payee = $builder;
-
-        return $this;
-    }
-
-    /**
-     * The seller's tax representative (BG-11): name (BT-62), VAT identifier (BT-63) and
-     * postal address (BG-12).
-     */
-    public function taxRepresentative(string $name, string $vatId, Address $address): static
-    {
-        $this->taxRepresentative = new TaxRepresentativeParty($name, $vatId, $address);
-
-        return $this;
-    }
-
-    /**
-     * Actual delivery or service date (BT-72).
-     */
-    public function deliveryDate(Date|DateTimeInterface|string $date): static
-    {
-        $this->delivery = ($this->delivery ?? new Delivery)->with(['actualDeliveryDate' => Date::parse($date, $this->meta->timezone)]);
-
-        return $this;
-    }
-
-    /**
-     * Deliver-to party and address (BT-70, BG-15).
-     */
-    public function deliverTo(?string $recipientName, ?Address $address = null, ?Identifier $locationId = null): static
-    {
-        $this->delivery = ($this->delivery ?? new Delivery)->with([
-            'recipientName' => $recipientName,
-            'address' => $address,
-            'locationId' => $locationId,
-        ]);
-
-        return $this;
-    }
-
-    /**
-     * Replaces the whole delivery information (BG-13), including the delivery date (BT-72).
-     */
-    public function delivery(Delivery $delivery): static
-    {
-        $this->delivery = $delivery;
-
-        return $this;
-    }
-
-    /**
-     * Invoicing period (BG-14).
-     */
-    public function invoicingPeriod(Date|string|null $start, Date|string|null $end = null): static
-    {
-        $this->invoicingPeriod = Period::between($start, $end);
-
-        return $this;
-    }
-
-    /**
-     * Payment instructions (BG-16) with an optional credit transfer account (BG-17).
-     *
-     * A second call replaces the payment instructions: an account given here replaces the
-     * accounts, and data of other payment means is dropped (e.g. bank accounts when switching
-     * to direct debit). Without an account, existing accounts are kept for credit transfers
-     * (e.g. a seller default account); likewise card (BG-18) and direct debit (BG-19) data for
-     * card payments and direct debits. The remittance information (BT-83) is kept unless a new
-     * one is given. Further accounts are added with creditTransfer().
-     */
-    public function payment(
-        PaymentMeansCode|RawCode|string $means,
-        ?string $iban = null,
-        ?string $bic = null,
-        ?string $accountName = null,
-        ?string $remittanceInformation = null,
-        ?string $meansText = null,
-    ): static {
-        $means = is_string($means) ? (PaymentMeansCode::tryFrom($means) ?? new RawCode($means)) : $means;
-        $previous = $this->paymentInstructions;
-        $code = (string) $means->value;
-
-        $transfers = match (true) {
-            $iban !== null => [new CreditTransfer(strtoupper(str_replace(' ', '', $iban)), $accountName, $bic)],
-            in_array($code, self::CREDIT_TRANSFER_MEANS, true) => $previous === null ? [] : $previous->creditTransfers,
-            default => [],
-        };
-
-        $this->paymentInstructions = new PaymentInstructions(
-            meansCode: $means,
-            meansText: $meansText,
-            remittanceInformation: $remittanceInformation ?? $previous?->remittanceInformation,
-            creditTransfers: $transfers,
-            card: in_array($code, self::CARD_MEANS, true) ? $previous?->card : null,
-            directDebit: in_array($code, self::DIRECT_DEBIT_MEANS, true) ? $previous?->directDebit : null,
-        );
-
-        return $this;
-    }
-
-    /**
-     * Adds a further bank account (BG-17).
-     */
-    public function creditTransfer(string $accountId, ?string $bic = null, ?string $accountName = null): static
-    {
-        $instructions = $this->paymentInstructions ?? new PaymentInstructions(PaymentMeansCode::SepaCreditTransfer);
-        $this->paymentInstructions = $instructions->with([
-            'creditTransfers' => [...$instructions->creditTransfers, new CreditTransfer(strtoupper(str_replace(' ', '', $accountId)), $accountName, $bic)],
-        ]);
-
-        return $this;
-    }
-
-    /**
-     * Payment card (BG-18): the last 4 to 6 digits of the card number (BT-87) and the holder
-     * (BT-88). Without payment instructions it starts them with BankCard (48).
-     *
-     * @throws InvalidArgumentException for more or fewer digits
-     */
-    public function paymentCard(string $lastDigits, ?string $holderName = null): static
-    {
-        $instructions = $this->paymentInstructions ?? new PaymentInstructions(PaymentMeansCode::BankCard);
-        $this->paymentInstructions = $instructions->with(['card' => new PaymentCard($lastDigits, $holderName)]);
-
-        return $this;
-    }
-
-    /**
-     * SEPA direct debit (BG-19): mandate reference (BT-89), creditor identifier (BT-90) and the
-     * debited IBAN (BT-91, spaces removed). Without payment instructions it starts them with
-     * SepaDirectDebit (59).
-     */
-    public function directDebit(?string $mandateReference, ?string $creditorId = null, ?string $debitedIban = null): static
-    {
-        $instructions = $this->paymentInstructions ?? new PaymentInstructions(PaymentMeansCode::SepaDirectDebit);
-        $this->paymentInstructions = $instructions->with([
-            'directDebit' => new DirectDebit($mandateReference, $creditorId, $debitedIban === null ? null : strtoupper(str_replace(' ', '', $debitedIban))),
-        ]);
-
-        return $this;
-    }
-
-    /**
-     * Payment target: the due date (BT-9) is the issue date plus $days unless dueDate() is set,
-     * and the payment terms say "Payable within … days without deduction." Continues the
-     * payment terms set before.
-     */
-    public function dueInDays(int $days): static
-    {
-        return $this->paymentTerms(static fn (PaymentTermsBuilder $terms) => $terms->dueInDays($days));
-    }
-
-    /**
-     * Cash discount ("Skonto") of $percent for payment within $days days after the issue date,
-     * optionally on a base amount; repeatable for several tiers. Continues the payment terms.
-     */
-    public function cashDiscount(int $days, string $percent, ?string $baseAmount = null): static
-    {
-        return $this->paymentTerms(static fn (PaymentTermsBuilder $terms) => $terms->cashDiscount($days, $percent, $baseAmount));
-    }
-
-    /**
-     * Late payment terms: days, percentage and text. Continues the payment terms.
-     */
-    public function lateFee(?int $days = null, ?string $percent = null, ?string $text = null): static
-    {
-        return $this->paymentTerms(static fn (PaymentTermsBuilder $terms) => $terms->lateFee($days, $percent, $text));
-    }
-
-    /**
-     * Payment terms (BT-20): a PaymentTerms object or a text replace earlier terms; a callable
-     * receives a PaymentTermsBuilder that continues the earlier terms, also those of a
-     * PaymentTerms object or of from(), like seller() and buyer().
-     *
-     * @param  PaymentTerms|string|callable(PaymentTermsBuilder): mixed  $terms
-     */
-    public function paymentTerms(PaymentTerms|string|callable $terms): static
-    {
-        if ($terms instanceof PaymentTerms) {
-            $this->paymentTerms = $terms;
-
-            return $this;
-        }
-
-        if (is_string($terms)) {
-            $this->paymentTerms = (new PaymentTermsBuilder)->text($terms);
-
-            return $this;
-        }
-
-        $builder = $this->paymentTerms instanceof PaymentTerms ? PaymentTermsBuilder::fromTerms($this->paymentTerms) : ($this->paymentTerms ?? new PaymentTermsBuilder);
-        $terms($builder);
-        $this->paymentTerms = $builder;
-
-        return $this;
-    }
-
-    /**
-     * Document level allowance (BG-20) for one VAT category and rate.
-     *
-     * The exemption reason (BT-120/BT-121) is used for the VAT breakdown when no invoice
-     * line of the same VAT group provides one, e.g. an exempt charge on a standard rated invoice.
-     */
-    public function allowance(
-        VatCategory $category,
-        BigDecimal|int|float|string|null $rate,
-        ?string $amount = null,
-        ?string $percent = null,
-        ?string $reason = null,
-        AllowanceReasonCode|RawCode|string|null $reasonCode = null,
-        ?string $baseAmount = null,
-        ?string $exemptionReason = null,
-        VatExemptionReasonCode|RawCode|string|null $exemptionReasonCode = null,
-    ): static {
-        $this->allowanceCharges[] = [
-            'charge' => false,
-            'amount' => $amount,
-            'percent' => $percent,
-            'base' => $baseAmount,
-            'category' => $category,
-            'rate' => $rate === null ? null : (string) Decimal::rejectFloat($rate),
-            'reason' => $reason,
-            'code' => is_string($reasonCode) ? (AllowanceReasonCode::tryFrom($reasonCode) ?? new RawCode($reasonCode)) : $reasonCode,
-            'exemptionReason' => $exemptionReason,
-            'exemptionCode' => is_string($exemptionReasonCode) ? (VatExemptionReasonCode::tryFrom($exemptionReasonCode) ?? new RawCode($exemptionReasonCode)) : $exemptionReasonCode,
-        ];
-
-        return $this;
-    }
-
-    /**
-     * Document level charge (BG-21) for one VAT category and rate. See allowance() for the exemption reason.
-     */
-    public function charge(
-        VatCategory $category,
-        BigDecimal|int|float|string|null $rate,
-        ?string $amount = null,
-        ?string $percent = null,
-        ?string $reason = null,
-        ChargeReasonCode|RawCode|string|null $reasonCode = null,
-        ?string $baseAmount = null,
-        ?string $exemptionReason = null,
-        VatExemptionReasonCode|RawCode|string|null $exemptionReasonCode = null,
-    ): static {
-        $this->allowanceCharges[] = [
-            'charge' => true,
-            'amount' => $amount,
-            'percent' => $percent,
-            'base' => $baseAmount,
-            'category' => $category,
-            'rate' => $rate === null ? null : (string) Decimal::rejectFloat($rate),
-            'reason' => $reason,
-            'code' => is_string($reasonCode) ? (ChargeReasonCode::tryFrom($reasonCode) ?? new RawCode($reasonCode)) : $reasonCode,
-            'exemptionReason' => $exemptionReason,
-            'exemptionCode' => is_string($exemptionReasonCode) ? (VatExemptionReasonCode::tryFrom($exemptionReasonCode) ?? new RawCode($exemptionReasonCode)) : $exemptionReasonCode,
-        ];
-
-        return $this;
-    }
-
-    /**
-     * Percentage discount on all lines. Split into one allowance per VAT group.
-     */
-    public function discountPercent(BigDecimal|int|float|string $percent, ?string $reason = null, AllowanceReasonCode|RawCode|string|null $reasonCode = AllowanceReasonCode::Discount): static
-    {
-        $this->splitAllowanceCharges[] = [
-            'charge' => false,
-            'percent' => (string) Decimal::rejectFloat($percent),
-            'amount' => null,
-            'reason' => $reason,
-            'code' => is_string($reasonCode) ? (AllowanceReasonCode::tryFrom($reasonCode) ?? new RawCode($reasonCode)) : $reasonCode,
-        ];
-
-        return $this;
-    }
-
-    /**
-     * Absolute discount distributed over all VAT groups in proportion to their line totals.
-     */
-    public function discountAmount(BigDecimal|int|float|string $amount, ?string $reason = null, AllowanceReasonCode|RawCode|string|null $reasonCode = AllowanceReasonCode::Discount): static
-    {
-        $this->splitAllowanceCharges[] = [
-            'charge' => false,
-            'percent' => null,
-            'amount' => (string) Decimal::rejectFloat($amount),
-            'reason' => $reason,
-            'code' => is_string($reasonCode) ? (AllowanceReasonCode::tryFrom($reasonCode) ?? new RawCode($reasonCode)) : $reasonCode,
-        ];
-
-        return $this;
-    }
-
-    /**
-     * Supporting document (BG-24), either embedded ($content) or as external link.
-     */
-    public function attachment(
-        string $id,
-        ?string $content = null,
-        MimeType|string|null $mimeType = null,
-        ?string $filename = null,
-        ?string $description = null,
-        ?string $externalUri = null,
-    ): static {
-        $this->attachments[] = new Attachment(
-            id: $id,
-            description: $description,
-            externalUri: $externalUri,
-            content: $content,
-            mimeType: is_string($mimeType) ? MimeType::from($mimeType) : $mimeType,
-            filename: $filename,
-        );
-
-        return $this;
-    }
-
-    /**
-     * Adds a line (BG-25): a name with the common values (->line('Consulting', netPrice: '120.00',
-     * quantity: 4, unit: UnitCode::Hour)), a LineBuilder (Line::make()), an array with the keys
-     * of LineBuilder::ARRAY_KEYS, an application model (ProvidesInvoiceLine), a callable that
-     * receives a new LineBuilder, or a finished InvoiceLine.
-     *
-     * @param  InvoiceLine|LineBuilder|ProvidesInvoiceLine|array<array-key, mixed>|callable(LineBuilder): mixed|string  $line
-     */
-    public function line(
-        InvoiceLine|LineBuilder|ProvidesInvoiceLine|array|callable|string $line,
-        BigDecimal|int|float|string|null $netPrice = null,
-        BigDecimal|int|float|string|null $quantity = null,
-        UnitCode|RawCode|string|null $unit = null,
-        TaxPreset|VatCategory|null $vat = null,
-        ?string $description = null,
-        BigDecimal|int|float|string|null $priceInclVat = null,
-    ): static {
-        $this->linesChanged = true;
-        if (! $line instanceof InvoiceLine) {
-            $this->lines[] = Line::from($line, $netPrice, $quantity, $unit, $vat, $description, $priceInclVat);
-
-            return $this;
-        }
-        if ($netPrice !== null || $quantity !== null || $unit !== null || $vat !== null || $description !== null || $priceInclVat !== null) {
-            throw new InvalidArgumentException('An InvoiceLine is taken as it is; change it with InvoiceLine::with() or, after from(), with updateLine().');
-        }
-        $this->lines[] = $line;
-
-        return $this;
-    }
-
-    /**
-     * @param  iterable<InvoiceLine|LineBuilder|ProvidesInvoiceLine|array<array-key, mixed>|callable(LineBuilder): mixed|string>  $lines
-     */
-    public function lines(iterable $lines): static
-    {
-        foreach ($lines as $line) {
-            $this->line($line);
-        }
-
-        return $this;
-    }
-
-    /**
-     * Changes an existing line, e.g. of a correction draft started with {@see self::from()}:
-     * with the named values ->updateLine('2', netPrice: '80.00', quantity: 3), or with a callable
-     * that receives the InvoiceLine and returns the changed one, e.g.
-     * ->updateLine('2', fn (InvoiceLine $l) => $l->with(['note' => 'Delivered in two parts'])).
-     * The calculated line net amount is reset, and percentage allowances and charges on the
-     * line amount are recalculated from the new amount.
-     *
-     * @param  (callable(InvoiceLine): InvoiceLine)|null  $change
-     */
-    public function updateLine(
-        string $id,
-        ?callable $change = null,
-        BigDecimal|int|float|string|null $netPrice = null,
-        BigDecimal|int|float|string|null $quantity = null,
-        BigDecimal|int|float|string|null $priceInclVat = null,
-        ?string $name = null,
-        ?string $description = null,
-    ): static {
-        $named = static function (InvoiceLine $line) use ($netPrice, $quantity, $priceInclVat, $name, $description): InvoiceLine {
-            if ($netPrice !== null) {
-                $line = $line->withNetPrice($netPrice);
-            }
-            if ($priceInclVat !== null) {
-                $line = $line->withPriceInclVat($priceInclVat);
-            }
-            if ($quantity !== null) {
-                $line = $line->with(['quantity' => Decimal::of($quantity)]);
-            }
-            $item = array_filter(['name' => $name, 'description' => $description], static fn (?string $value): bool => $value !== null);
-
-            return $item === [] ? $line : $line->with(['item' => $line->item->with($item)]);
-        };
-        $found = false;
-        $lines = [];
-        foreach ($this->lines as $line) {
-            if (! $found && $line instanceof InvoiceLine && $line->id === $id) {
-                $changed = $named($change === null ? $line : $change($line));
-                $line = self::withPercentagesReset($changed, self::lineBaseAmount($line))->with(['netAmount' => null]);
-                $found = true;
-            }
-            $lines[] = $line;
-        }
-        if (! $found) {
-            throw new InvalidArgumentException(sprintf('The invoice has no line "%s".', $id));
-        }
-        $this->lines = $lines;
-        $this->linesChanged = true;
-
-        return $this;
-    }
-
-    /**
-     * Removes an existing line by its identifier (BT-126).
-     */
-    public function removeLine(string $id): static
-    {
-        $lines = array_values(array_filter($this->lines, static fn (InvoiceLine|LineBuilder $line): bool => ! $line instanceof InvoiceLine || $line->id !== $id));
-        if (count($lines) < count($this->lines)) {
-            $this->lines = $lines;
-            $this->linesChanged = true;
-
-            return $this;
-        }
-
-        throw new InvalidArgumentException(sprintf('The invoice has no line "%s".', $id));
-    }
-
-    /**
-     * Amount already paid (BT-113), e.g. received advance payments.
-     */
-    public function prepaid(BigDecimal|int|float|string $amount): static
-    {
-        $this->prepaid = (string) Decimal::rejectFloat($amount);
-
-        return $this;
-    }
-
-    /**
-     * Adds to the amount already paid (BT-113), e.g. one of several advance payments.
-     */
-    public function addPrepaid(BigDecimal|int|float|string $amount): static
-    {
-        $this->prepaid = (string) Decimal::of($this->prepaid ?? '0')->plus(Decimal::of(Decimal::rejectFloat($amount)));
-
-        return $this;
-    }
-
-    /**
-     * Rounding amount (BT-114), e.g. cash rounding. Never use it to fix wrong totals.
-     */
-    public function rounding(BigDecimal|int|float|string $amount): static
-    {
-        $this->rounding = (string) Decimal::rejectFloat($amount);
-
-        return $this;
-    }
-
-    /**
-     * Data of the profile EXTENDED of ZUGFeRD/Factur-X (further parties, delivery terms,
-     * instalments …); other profiles do not write it.
-     */
-    public function extended(ExtendedData $extended): static
-    {
-        $this->extended = $extended;
-
-        return $this;
-    }
-
-    /**
-     * Data of the XRechnung extension (e.g. third party payments), written only with the
-     * profile xrechnung-extension.
-     */
-    public function xrechnungExtension(XRechnungExtensionData $extension): static
-    {
-        $this->xrechnungExtension = $extension;
-
-        return $this;
-    }
-
-    /**
-     * Design of this invoice in PDF and HTML: a Presentation replaces it, an array changes single
-     * values (->presentation(['introText' => 'Thank you for your order.', 'showGrossPrices' => true])),
-     * a callable receives the current Presentation and returns the new one.
-     *
-     * @param  Presentation|array<string, mixed>|callable(Presentation): Presentation  $presentation
-     */
-    public function presentation(Presentation|array|callable $presentation): static
-    {
-        $current = $this->presentation ?? new Presentation;
-        if (is_array($presentation)) {
-            $changes = [];
-            foreach ($presentation as $property => $value) {
-                if (! is_string($property)) {
-                    throw new InvalidArgumentException('presentation() takes the changes by property name, e.g. [\'introText\' => \'Thank you.\'].');
-                }
-                $changes[$property] = $value;
-            }
-            $this->presentation = $current->with($changes);
-
-            return $this;
-        }
-        $this->presentation = $presentation instanceof Presentation ? $presentation : $presentation($current);
-
-        return $this;
-    }
-
-    /**
-     * Defines a line group for the PDF. Lines join it via LineBuilder::group().
-     */
-    public function group(string $id, string $title, bool $showSubtotal = true): static
-    {
-        $presentation = $this->presentation ?? new Presentation;
-        $this->presentation = $presentation->with([
-            'lineGroups' => [...$presentation->lineGroups, new LineGroup($id, $title, $showSubtotal)],
-        ]);
-
-        return $this;
-    }
-
-    /**
-     * Language of the invoice: labels, generated texts and the exemption texts of presets.
-     * The locale of a render call wins; without both, the configured locale or the country default.
-     */
-    public function locale(string $locale): static
-    {
-        $this->meta = $this->meta->with(['locale' => $locale]);
-
-        return $this;
-    }
-
-    /**
-     * Time zone for DateTimeInterface values and for the default issue date; call it before the
-     * date setters.
-     */
-    public function timezone(string $timezone): static
-    {
-        $this->meta = $this->meta->with(['timezone' => $timezone]);
-
-        return $this;
-    }
-
-    /**
-     * Free data for templates (view model key meta.custom); the same key replaces the value.
-     */
-    public function custom(string $key, mixed $value): static
-    {
-        $this->meta = $this->meta->with(['custom' => [...$this->meta->custom, $key => $value]]);
-
-        return $this;
-    }
-
-    /**
-     * Sets a flag that country packs evaluate (e.g. a small amount invoice in Germany).
-     */
-    public function flag(string $flag, bool $enabled = true): static
-    {
-        $this->meta = $this->meta->withFlag($flag, $enabled);
-        if ($this->defaults !== null) {
-            $this->explicitFlags[$flag] = true;
-        }
-
-        return $this;
-    }
-
-    /**
-     * Origin of the data, e.g. "shop" (view model key meta.source).
-     */
-    public function source(string $source): static
-    {
-        $this->meta = $this->meta->with(['source' => $source]);
-
-        return $this;
-    }
-
-    /**
-     * Version of EN 16931 (BT-24 of the profile): 2017 (default) or 2026, which only the profile
-     * EN 16931 supports.
-     */
-    public function standard(StandardVersion $version): static
-    {
-        $this->standardVersion = $version;
-
-        return $this;
-    }
 
     /**
      * Applies the defaults of a seller, e.g. the seller of config/quittio.php with its bank
@@ -1400,15 +512,6 @@ class InvoiceBuilder
     }
 
     /**
-     * The builder of a party given to seller() or buyer(): a builder is copied, so a party used
-     * as template stays unchanged.
-     */
-    private static function partyBuilder(PartyBuilder|ProvidesParty $party): PartyBuilder
-    {
-        return $party instanceof PartyBuilder ? clone $party : (new PartyBuilder)->fromModel($party);
-    }
-
-    /**
      * Identifiers of the lines and their sub lines.
      *
      * @param  list<InvoiceLine>  $lines
@@ -1426,7 +529,77 @@ class InvoiceBuilder
 
     private function assemble(bool $requireLines): InvoiceData
     {
+        $lines = $this->assembleLines($requireLines);
+        [$allowances, $charges] = $this->assembleAllowancesAndCharges($lines);
+        $seller = $this->seller instanceof PartyBuilder ? $this->seller->buildSeller() : $this->seller;
+        $buyer = $this->buyer instanceof PartyBuilder ? $this->buyer->buildBuyer() : $this->buyer;
+
+        [$meta, $keepDeclared, $amountsChanged] = $this->declaredAmountsMeta();
+        if ($amountsChanged) {
+            // Changed data is recalculated completely: line net amounts of the previous data must
+            // not be taken as declared later (e.g. by from() of a stored draft).
+            $lines = self::withoutNetAmounts($lines);
+        }
+
+        $invoice = new InvoiceData(
+            number: $this->number,
+            issueDate: $this->issueDate ?? Date::today($this->meta->timezone),
+            typeCode: $this->typeCode,
+            currency: $this->currency,
+            seller: $seller ?? throw InvalidInvoiceData::missing('BG-4', 'seller'),
+            buyer: $buyer ?? throw InvalidInvoiceData::missing('BG-7', 'buyer'),
+            lines: $lines,
+            taxCurrency: $this->taxCurrency,
+            taxPointDate: $this->taxPointDate,
+            taxPointDateCode: $this->taxPointDateCode,
+            dueDate: $this->dueDate,
+            buyerReference: $this->references['buyerReference'] ?? null,
+            projectReference: $this->projectReference,
+            contractReference: $this->references['contractReference'] ?? null,
+            purchaseOrderReference: $this->references['purchaseOrderReference'] ?? null,
+            salesOrderReference: $this->references['salesOrderReference'] ?? null,
+            receivingAdviceReference: $this->references['receivingAdviceReference'] ?? null,
+            despatchAdviceReference: $this->references['despatchAdviceReference'] ?? null,
+            tenderReference: $this->references['tenderReference'] ?? null,
+            invoicedObject: $this->invoicedObject,
+            buyerAccountingReference: $this->references['buyerAccountingReference'] ?? null,
+            paymentTerms: $this->paymentTerms instanceof PaymentTermsBuilder ? $this->paymentTerms->build($this->currency) : $this->paymentTerms,
+            notes: $this->notes,
+            businessProcess: $this->businessProcess,
+            precedingInvoices: $this->precedingInvoices,
+            payee: $this->payee instanceof PartyBuilder ? $this->payee->buildPayee() : $this->payee,
+            sellerTaxRepresentative: $this->taxRepresentative,
+            delivery: $this->delivery,
+            invoicingPeriod: $this->invoicingPeriod,
+            paymentInstructions: $this->paymentInstructions,
+            allowances: $allowances,
+            charges: $charges,
+            attachments: $this->attachments,
+            prepaidAmount: $this->money($this->prepaid),
+            roundingAmount: $this->money($this->rounding),
+            vatBreakdown: $keepDeclared ? $this->declaredBreakdown : [],
+            extended: $this->extended,
+            xrechnungExtension: $this->xrechnungExtension,
+            presentation: $this->presentation,
+            meta: $meta,
+            standardVersion: $this->standardVersion,
+        );
+
+        // Amounts taken over from the data given to from() belong to their inputs (fingerprint).
+        return DeclaredAmounts::hasAmounts($invoice) ? $invoice->with(['meta' => $meta->withAmountsFingerprint(DeclaredAmounts::fingerprint($invoice))]) : $invoice;
+    }
+
+    /**
+     * The lines: identifiers, VAT default and supply date for the builders, then checked for
+     * unique identifiers and, for build(), at least one line (BG-25).
+     *
+     * @return list<InvoiceLine>
+     */
+    private function assembleLines(bool $requireLines): array
+    {
         $locale = $this->meta->locale;
+        // Decides the rate of presets that depend on the date (DatedTaxPreset); line periods win.
+        $supplyDate = SupplyDate::resolve(null, $this->taxPointDate, $this->delivery?->actualDeliveryDate, $this->invoicingPeriod, $this->issueDate);
         // Default line identifiers (BT-126) count the position and skip the identifiers of
         // existing lines and those set with id(), which must stay unique, e.g. after from() and
         // removeLine().
@@ -1453,7 +626,7 @@ class InvoiceBuilder
                         $default++;
                     }
                 }
-                $line = $line->build($this->currency, (string) $default, $locale, $vatDefault);
+                $line = $line->build($this->currency, (string) $default, $locale, $vatDefault, $supplyDate);
                 $taken[$line->id] = true;
             }
             $lines[] = $line;
@@ -1470,6 +643,19 @@ class InvoiceBuilder
             throw InvalidInvoiceData::missing('BG-25', 'invoice lines');
         }
 
+        return $lines;
+    }
+
+    /**
+     * Document level allowances and charges: those taken over by from() (with percentages and
+     * split discounts following changed lines), the added ones and the discounts split over the
+     * VAT groups of the lines.
+     *
+     * @param  list<InvoiceLine>  $lines
+     * @return array{list<DocumentAllowance>, list<DocumentCharge>}
+     */
+    private function assembleAllowancesAndCharges(array $lines): array
+    {
         $allowances = $this->existingAllowances;
         $charges = $this->existingCharges;
         $splitter = new AllowanceSplitter;
@@ -1527,9 +713,17 @@ class InvoiceBuilder
             )];
         }
 
-        $seller = $this->seller instanceof PartyBuilder ? $this->seller->buildSeller() : $this->seller;
-        $buyer = $this->buyer instanceof PartyBuilder ? $this->buyer->buildBuyer() : $this->buyer;
+        return [array_values($allowances), array_values($charges)];
+    }
 
+    /**
+     * The meta data with the declared amounts flags of the result: declared amounts (from())
+     * stay as long as no amount-relevant input changed.
+     *
+     * @return array{Meta, bool, bool} meta, whether the declared amounts are kept, whether amounts changed
+     */
+    private function declaredAmountsMeta(): array
+    {
         // Declared amounts (from()) stay as long as no amount-relevant input changed; an implied
         // exchange rate is not applied to changed amounts or to another VAT accounting currency.
         $amountsChanged = $this->linesChanged || $this->allowanceCharges !== [] || $this->splitAllowanceCharges !== []
@@ -1541,61 +735,11 @@ class InvoiceBuilder
             ->withFlag(Meta::FLAG_DECLARED_AMOUNTS_RECALCULATED, ! $amountsChanged && $this->meta->hasFlag(Meta::FLAG_DECLARED_AMOUNTS_RECALCULATED))
             ->withFlag(Meta::FLAG_CANCELLATION_VAT_ALIGNED, ! $amountsChanged && $this->meta->hasFlag(Meta::FLAG_CANCELLATION_VAT_ALIGNED))
             ->withDeclaredVatInTaxCurrency($keepDeclared ? $this->meta->declaredVatInTaxCurrency() : null);
-        if ($amountsChanged) {
-            // Changed data is recalculated completely: line net amounts of the previous data must
-            // not be taken as declared later (e.g. by from() of a stored draft).
-            $lines = self::withoutNetAmounts($lines);
-        }
         if ($this->impliedExchangeRate && ($amountsChanged || $this->taxCurrency !== $this->declaredTaxCurrency)) {
             $meta = $meta->with(['exchangeRate' => null, 'exchangeRateDate' => null]);
         }
 
-        $invoice = new InvoiceData(
-            number: $this->number,
-            issueDate: $this->issueDate ?? Date::today($this->meta->timezone),
-            typeCode: $this->typeCode,
-            currency: $this->currency,
-            seller: $seller ?? throw InvalidInvoiceData::missing('BG-4', 'seller'),
-            buyer: $buyer ?? throw InvalidInvoiceData::missing('BG-7', 'buyer'),
-            lines: $lines,
-            taxCurrency: $this->taxCurrency,
-            taxPointDate: $this->taxPointDate,
-            taxPointDateCode: $this->taxPointDateCode,
-            dueDate: $this->dueDate,
-            buyerReference: $this->references['buyerReference'] ?? null,
-            projectReference: $this->projectReference,
-            contractReference: $this->references['contractReference'] ?? null,
-            purchaseOrderReference: $this->references['purchaseOrderReference'] ?? null,
-            salesOrderReference: $this->references['salesOrderReference'] ?? null,
-            receivingAdviceReference: $this->references['receivingAdviceReference'] ?? null,
-            despatchAdviceReference: $this->references['despatchAdviceReference'] ?? null,
-            tenderReference: $this->references['tenderReference'] ?? null,
-            invoicedObject: $this->invoicedObject,
-            buyerAccountingReference: $this->references['buyerAccountingReference'] ?? null,
-            paymentTerms: $this->paymentTerms instanceof PaymentTermsBuilder ? $this->paymentTerms->build($this->currency) : $this->paymentTerms,
-            notes: $this->notes,
-            businessProcess: $this->businessProcess,
-            precedingInvoices: $this->precedingInvoices,
-            payee: $this->payee instanceof PartyBuilder ? $this->payee->buildPayee() : $this->payee,
-            sellerTaxRepresentative: $this->taxRepresentative,
-            delivery: $this->delivery,
-            invoicingPeriod: $this->invoicingPeriod,
-            paymentInstructions: $this->paymentInstructions,
-            allowances: $allowances,
-            charges: $charges,
-            attachments: $this->attachments,
-            prepaidAmount: $this->money($this->prepaid),
-            roundingAmount: $this->money($this->rounding),
-            vatBreakdown: $keepDeclared ? $this->declaredBreakdown : [],
-            extended: $this->extended,
-            xrechnungExtension: $this->xrechnungExtension,
-            presentation: $this->presentation,
-            meta: $meta,
-            standardVersion: $this->standardVersion,
-        );
-
-        // Amounts taken over from the data given to from() belong to their inputs (fingerprint).
-        return DeclaredAmounts::hasAmounts($invoice) ? $invoice->with(['meta' => $meta->withAmountsFingerprint(DeclaredAmounts::fingerprint($invoice))]) : $invoice;
+        return [$meta, $keepDeclared, $amountsChanged];
     }
 
     /**
@@ -1755,13 +899,6 @@ class InvoiceBuilder
             'allowances' => array_map($reset, $line->allowances),
             'charges' => array_map($reset, $line->charges),
         ]);
-    }
-
-    private function reference(string $key, ?string $value): static
-    {
-        $this->references[$key] = $value;
-
-        return $this;
     }
 
     private function money(?string $value): ?Money

@@ -16,14 +16,23 @@ use Quittio\Core\Enums\VatExemptionReasonCode;
 interface TaxPreset
 {
     /**
-     * Stable key, prefixed with the country code, e.g. "de.standard_19".
+     * Stable key, prefixed with the country code, e.g. "de.standard".
      */
     public function key(): string;
 
+    /**
+     * VAT category (BT-151).
+     */
     public function category(): VatCategory;
 
+    /**
+     * VAT rate in percent (BT-152); null for categories without a rate (e.g. O).
+     */
     public function rate(): ?BigDecimal;
 
+    /**
+     * VATEX code of the exemption reason (BT-121); null for taxed supplies.
+     */
     public function exemptionReasonCode(): VatExemptionReasonCode|RawCode|null;
 
     /**
