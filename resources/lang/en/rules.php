@@ -311,6 +311,58 @@ return [
         'message' => 'An invoice with VAT category "O" (not subject to VAT) shall not contain other VAT categories.',
         'hint' => 'Issue separate invoices for supplies that are not subject to VAT.',
     ],
+    'BR-AF-01' => [
+        'message' => 'An invoice that contains VAT category ":category" shall contain at least one VAT breakdown (BG-23) with this category.',
+    ],
+    'BR-AF-02' => [
+        'message' => 'An invoice with VAT category "L" (IGIC, Canary Islands) shall contain the seller VAT identifier (BT-31), the seller tax registration identifier (BT-32) or the seller tax representative VAT identifier (BT-63).',
+        'hint' => 'Set the VAT identifier with ->vatId() or the tax number with ->taxNumber() of the seller.',
+    ],
+    'BR-AF-05' => [
+        'message' => 'In an invoice line, document level allowance or charge with VAT category ":category" the VAT rate shall be 0 (zero) or greater than zero.',
+    ],
+    'BR-AF-08' => [
+        'message' => 'For each VAT rate of category ":category" the taxable amount (BT-116) shall equal the sum of line net amounts minus allowances plus charges of this category and rate.',
+    ],
+    'BR-AF-09' => [
+        'message' => 'The VAT category tax amount (BT-117) for category ":category" shall equal the taxable amount (BT-116) multiplied by the rate (BT-119).',
+    ],
+    'BR-AF-10' => [
+        'message' => 'A VAT breakdown with category ":category" shall not have a VAT exemption reason code (BT-121) or text (BT-120).',
+        'hint' => 'Remove the exemption reason; it is allowed only for the categories E, AE, K, G and O.',
+    ],
+    'BR-AG-01' => [
+        'message' => 'An invoice that contains VAT category ":category" shall contain at least one VAT breakdown (BG-23) with this category.',
+    ],
+    'BR-AG-02' => [
+        'message' => 'An invoice with VAT category "M" (IPSI, Ceuta and Melilla) shall contain the seller VAT identifier (BT-31), the seller tax registration identifier (BT-32) or the seller tax representative VAT identifier (BT-63).',
+        'hint' => 'Set the VAT identifier with ->vatId() or the tax number with ->taxNumber() of the seller.',
+    ],
+    'BR-AG-05' => [
+        'message' => 'In an invoice line, document level allowance or charge with VAT category ":category" the VAT rate shall be 0 (zero) or greater than zero.',
+    ],
+    'BR-AG-08' => [
+        'message' => 'For each VAT rate of category ":category" the taxable amount (BT-116) shall equal the sum of line net amounts minus allowances plus charges of this category and rate.',
+    ],
+    'BR-AG-09' => [
+        'message' => 'The VAT category tax amount (BT-117) for category ":category" shall equal the taxable amount (BT-116) multiplied by the rate (BT-119).',
+    ],
+    'BR-AG-10' => [
+        'message' => 'A VAT breakdown with category ":category" shall not have a VAT exemption reason code (BT-121) or text (BT-120).',
+        'hint' => 'Remove the exemption reason; it is allowed only for the categories E, AE, K, G and O.',
+    ],
+    'BR-B-01' => [
+        'message' => 'An invoice with VAT category "B" (split payment) shall be a domestic Italian invoice: every country code (BT-40, BT-55, BT-69, BT-80, BT-159) shall be "IT", found ":value".',
+        'hint' => 'Split payment (scissione dei pagamenti) applies only between Italian parties; use category "S" for other invoices.',
+    ],
+    'BR-B-02' => [
+        'message' => 'An invoice with VAT category "B" (split payment) shall not contain lines, document level allowances, charges or VAT breakdowns with VAT category "S".',
+        'hint' => 'Issue separate invoices for supplies with split payment and for standard rated supplies.',
+    ],
+    'QUITTIO-IGIC-ZERO-RATE-CII' => [
+        'message' => 'VAT category "L" (IGIC) with the rate 0 in :value: EN 16931 and UBL accept it (BR-AF-05 to BR-AF-07), the official CII Schematron requires a rate greater than zero. Use UBL for this invoice.',
+        'hint' => 'Render the invoice as UBL (e.g. Peppol BIS or XRechnung UBL); CII (ZUGFeRD/Factur-X, XRechnung CII) is rejected by the official validation.',
+    ],
     'BR-CL-01' => [
         'message' => 'The document type code (BT-3) ":value" is not part of the invoice and credit note related code lists of UNTDID 1001.',
     ],
@@ -491,6 +543,106 @@ return [
     ],
     'PEPPOL-EN16931-R130' => [
         'message' => 'The unit code of the price base quantity (BT-150) of line :line must be the same as the invoiced quantity unit (BT-130).',
+    ],
+    'PEPPOL-EN16931-R007' => [
+        'message' => 'The business process (BT-23) ":value" must be in the format urn:fdc:peppol.eu:2017:poacc:billing:NN:1.0, where NN is the process number.',
+        'hint' => 'Leave ->businessProcess() unset for the default process urn:fdc:peppol.eu:2017:poacc:billing:01:1.0.',
+    ],
+    'PEPPOL-EN16931-R008' => [
+        'message' => 'The value of :field (:bt) contains only whitespace. Peppol does not allow empty elements.',
+        'hint' => 'Leave the field out or provide a value.',
+    ],
+    'PEPPOL-EN16931-R046' => [
+        'message' => 'The item net price (BT-146) of line :line must equal the item gross price (BT-148) minus the item price discount (BT-147).',
+        'hint' => 'Set only ->listPrice(gross, discount), the net price is derived from it.',
+    ],
+    'PEPPOL-EN16931-R055' => [
+        'message' => 'The invoice total VAT amount (BT-110) and the invoice total VAT amount in accounting currency (BT-111) must have the same operational sign.',
+        'hint' => 'Check the exchange rate (->exchangeRate()), it must be positive.',
+    ],
+    'PEPPOL-EN16931-R110' => [
+        'message' => 'The start date (BT-134) of the period of line :line must not be before the start of the invoicing period (BT-73).',
+    ],
+    'PEPPOL-EN16931-R111' => [
+        'message' => 'The end date (BT-135) of the period of line :line must not be after the end of the invoicing period (BT-74).',
+    ],
+    'PEPPOL-EN16931-CL007' => [
+        'message' => 'The currency code ":value" is not allowed in Peppol.',
+        'hint' => 'The Peppol rules use their own version of ISO 4217, which does not contain this code (yet).',
+    ],
+    'PEPPOL-EN16931-F001' => [
+        'message' => 'The date :value (:bt) must be formatted YYYY-MM-DD.',
+    ],
+    'PEPPOL-EN16931-P0100' => [
+        'message' => 'The invoice type code (BT-3) ":value" is not allowed in Peppol business process 01.',
+        'hint' => 'Use a type code of Peppol business process 01, e.g. 380 (commercial invoice).',
+    ],
+    'PEPPOL-EN16931-P0101' => [
+        'message' => 'The credit note type code (BT-3) ":value" is not allowed in Peppol business process 01.',
+        'hint' => 'Peppol business process 01 allows the credit note type codes 81, 83, 381, 396 and 532.',
+    ],
+    'PEPPOL-EN16931-P0112' => [
+        'message' => 'The invoice type codes 326 (partial invoice) and 384 (corrected invoice) are only allowed when both buyer and seller are German organisations.',
+    ],
+    'PEPPOL-EN16931-P0104' => [
+        'message' => 'The VAT exemption reason code VATEX-EU-G (BT-121) requires the VAT category G (BT-118), not :category.',
+    ],
+    'PEPPOL-EN16931-P0105' => [
+        'message' => 'The VAT exemption reason code VATEX-EU-O (BT-121) requires the VAT category O (BT-118), not :category.',
+    ],
+    'PEPPOL-EN16931-P0106' => [
+        'message' => 'The VAT exemption reason code VATEX-EU-IC (BT-121) requires the VAT category K (BT-118), not :category.',
+    ],
+    'PEPPOL-EN16931-P0107' => [
+        'message' => 'The VAT exemption reason code VATEX-EU-AE (BT-121) requires the VAT category AE (BT-118), not :category.',
+    ],
+    'PEPPOL-EN16931-P0108' => [
+        'message' => 'The VAT exemption reason code VATEX-EU-D (BT-121) requires the VAT category E (BT-118), not :category.',
+    ],
+    'PEPPOL-EN16931-P0109' => [
+        'message' => 'The VAT exemption reason code VATEX-EU-F (BT-121) requires the VAT category E (BT-118), not :category.',
+    ],
+    'PEPPOL-EN16931-P0110' => [
+        'message' => 'The VAT exemption reason code VATEX-EU-I (BT-121) requires the VAT category E (BT-118), not :category.',
+    ],
+    'PEPPOL-EN16931-P0111' => [
+        'message' => 'The VAT exemption reason code VATEX-EU-J (BT-121) requires the VAT category E (BT-118), not :category.',
+    ],
+    'PEPPOL-COMMON-R040' => [
+        'message' => 'The GLN ":value" (scheme 0088) must have a valid format according to the GS1 rules.',
+    ],
+    'PEPPOL-COMMON-R041' => [
+        'message' => 'The Norwegian organisation number ":value" (scheme 0192) must consist of nine digits with a valid check digit.',
+    ],
+    'PEPPOL-COMMON-R042' => [
+        'message' => 'The Danish organisation number (CVR) ":value" (scheme 0184) must consist of eight digits, optionally preceded by DK.',
+    ],
+    'PEPPOL-COMMON-R043' => [
+        'message' => 'The Belgian enterprise number ":value" (scheme 0208) must consist of ten digits with valid check digits.',
+    ],
+    'PEPPOL-COMMON-R044' => [
+        'message' => 'The IPA code ":value" (scheme 0201) should consist of six letters or digits.',
+    ],
+    'PEPPOL-COMMON-R045' => [
+        'message' => 'The Italian tax code (codice fiscale) ":value" (scheme 0210) should be stated in the correct format.',
+    ],
+    'PEPPOL-COMMON-R046' => [
+        'message' => 'The Italian tax code (codice fiscale) ":value" (scheme 9907) should be stated in the correct format.',
+    ],
+    'PEPPOL-COMMON-R047' => [
+        'message' => 'The Italian VAT number (partita IVA) ":value" (scheme 0211) should be stated in the correct format.',
+    ],
+    'PEPPOL-COMMON-R049' => [
+        'message' => 'The Swedish organisation number ":value" (scheme 0007) must consist of ten digits with a valid check digit.',
+    ],
+    'PEPPOL-COMMON-R050' => [
+        'message' => 'The Australian Business Number (ABN) ":value" (scheme 0151) must consist of eleven digits with valid check digits.',
+    ],
+    'PEPPOL-COMMON-R052' => [
+        'message' => 'The Danish P number ":value" (scheme 0096) should consist of ten digits.',
+    ],
+    'PEPPOL-COMMON-R053' => [
+        'message' => 'The Danish ERSTORG number (SE) ":value" (scheme 0198) should consist of DK and eight digits.',
     ],
     'QUITTIO-PROFILE-REQUIRED' => [
         'message' => 'The field :field (:bt) is mandatory in profile :profile.',

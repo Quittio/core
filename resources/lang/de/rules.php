@@ -311,6 +311,58 @@ return [
         'message' => 'Eine Rechnung mit der Kategorie „O“ (nicht steuerbar) darf keine anderen Umsatzsteuerkategorien enthalten.',
         'hint' => 'Stellen Sie für nicht steuerbare Umsätze eine eigene Rechnung aus.',
     ],
+    'BR-AF-01' => [
+        'message' => 'Eine Rechnung mit der Umsatzsteuerkategorie „:category“ muss mindestens eine Steueraufschlüsselung (BG-23) mit dieser Kategorie enthalten.',
+    ],
+    'BR-AF-02' => [
+        'message' => 'Eine Rechnung mit der Kategorie „L“ (IGIC, Kanarische Inseln) muss die USt-IdNr. des Verkäufers (BT-31), seine Steuernummer (BT-32) oder die USt-IdNr. des Steuervertreters (BT-63) enthalten.',
+        'hint' => 'Setzen Sie die USt-IdNr. des Verkäufers mit ->vatId() oder seine Steuernummer mit ->taxNumber().',
+    ],
+    'BR-AF-05' => [
+        'message' => 'Bei Positionen, Nachlässen und Zuschlägen mit der Kategorie „:category“ muss der Steuersatz 0 oder größer als null sein.',
+    ],
+    'BR-AF-08' => [
+        'message' => 'Für jeden Steuersatz der Kategorie „:category“ muss die Bemessungsgrundlage (BT-116) der Summe der Positionsbeträge abzüglich Nachlässen zuzüglich Zuschlägen dieser Kategorie und dieses Satzes entsprechen.',
+    ],
+    'BR-AF-09' => [
+        'message' => 'Der Steuerbetrag (BT-117) der Kategorie „:category“ muss der Bemessungsgrundlage (BT-116) multipliziert mit dem Steuersatz (BT-119) entsprechen.',
+    ],
+    'BR-AF-10' => [
+        'message' => 'Eine Steueraufschlüsselung mit der Kategorie „:category“ darf keinen Befreiungsgrund (BT-120, BT-121) enthalten.',
+        'hint' => 'Entfernen Sie den Befreiungsgrund; er ist nur bei den Kategorien E, AE, K, G und O zulässig.',
+    ],
+    'BR-AG-01' => [
+        'message' => 'Eine Rechnung mit der Umsatzsteuerkategorie „:category“ muss mindestens eine Steueraufschlüsselung (BG-23) mit dieser Kategorie enthalten.',
+    ],
+    'BR-AG-02' => [
+        'message' => 'Eine Rechnung mit der Kategorie „M“ (IPSI, Ceuta und Melilla) muss die USt-IdNr. des Verkäufers (BT-31), seine Steuernummer (BT-32) oder die USt-IdNr. des Steuervertreters (BT-63) enthalten.',
+        'hint' => 'Setzen Sie die USt-IdNr. des Verkäufers mit ->vatId() oder seine Steuernummer mit ->taxNumber().',
+    ],
+    'BR-AG-05' => [
+        'message' => 'Bei Positionen, Nachlässen und Zuschlägen mit der Kategorie „:category“ muss der Steuersatz 0 oder größer als null sein.',
+    ],
+    'BR-AG-08' => [
+        'message' => 'Für jeden Steuersatz der Kategorie „:category“ muss die Bemessungsgrundlage (BT-116) der Summe der Positionsbeträge abzüglich Nachlässen zuzüglich Zuschlägen dieser Kategorie und dieses Satzes entsprechen.',
+    ],
+    'BR-AG-09' => [
+        'message' => 'Der Steuerbetrag (BT-117) der Kategorie „:category“ muss der Bemessungsgrundlage (BT-116) multipliziert mit dem Steuersatz (BT-119) entsprechen.',
+    ],
+    'BR-AG-10' => [
+        'message' => 'Eine Steueraufschlüsselung mit der Kategorie „:category“ darf keinen Befreiungsgrund (BT-120, BT-121) enthalten.',
+        'hint' => 'Entfernen Sie den Befreiungsgrund; er ist nur bei den Kategorien E, AE, K, G und O zulässig.',
+    ],
+    'BR-B-01' => [
+        'message' => 'Eine Rechnung mit der Kategorie „B“ (Split Payment) muss eine italienische Inlandsrechnung sein: Jeder Ländercode (BT-40, BT-55, BT-69, BT-80, BT-159) muss „IT“ sein, gefunden „:value“.',
+        'hint' => 'Das Split Payment (scissione dei pagamenti) gilt nur zwischen italienischen Parteien; verwenden Sie für andere Rechnungen die Kategorie „S“.',
+    ],
+    'BR-B-02' => [
+        'message' => 'Eine Rechnung mit der Kategorie „B“ (Split Payment) darf keine Positionen, Nachlässe, Zuschläge oder Steueraufschlüsselungen mit der Kategorie „S“ enthalten.',
+        'hint' => 'Stellen Sie für Umsätze mit Split Payment und für Umsätze zum Normalsatz getrennte Rechnungen aus.',
+    ],
+    'QUITTIO-IGIC-ZERO-RATE-CII' => [
+        'message' => 'Kategorie „L“ (IGIC) mit dem Steuersatz 0 in :value: EN 16931 und UBL lassen ihn zu (BR-AF-05 bis BR-AF-07), die offizielle CII-Schematron-Prüfung verlangt einen Steuersatz größer als null. Verwenden Sie für diese Rechnung UBL.',
+        'hint' => 'Erzeugen Sie die Rechnung als UBL (z. B. Peppol BIS oder XRechnung UBL); CII (ZUGFeRD/Factur-X, XRechnung CII) wird von der offiziellen Prüfung abgelehnt.',
+    ],
     'BR-CL-01' => [
         'message' => 'Der Rechnungsartcode (BT-3) „:value“ ist in der Codeliste UNTDID 1001 für Rechnungen und Gutschriften nicht enthalten.',
     ],
@@ -491,6 +543,106 @@ return [
     ],
     'PEPPOL-EN16931-R130' => [
         'message' => 'Die Einheit der Basismenge (BT-150) der Position :line muss der Einheit der Menge (BT-130) entsprechen.',
+    ],
+    'PEPPOL-EN16931-R007' => [
+        'message' => 'Die Prozesskennung (BT-23) ":value" muss das Format urn:fdc:peppol.eu:2017:poacc:billing:NN:1.0 haben, wobei NN die Prozessnummer ist.',
+        'hint' => 'Lassen Sie ->businessProcess() weg, um den Standardprozess urn:fdc:peppol.eu:2017:poacc:billing:01:1.0 zu verwenden.',
+    ],
+    'PEPPOL-EN16931-R008' => [
+        'message' => 'Der Wert von :field (:bt) besteht nur aus Leerzeichen. Peppol erlaubt keine leeren Elemente.',
+        'hint' => 'Lassen Sie das Feld weg oder geben Sie einen Wert an.',
+    ],
+    'PEPPOL-EN16931-R046' => [
+        'message' => 'Der Nettopreis (BT-146) der Position :line muss dem Bruttopreis (BT-148) abzüglich des Preisnachlasses (BT-147) entsprechen.',
+        'hint' => 'Setzen Sie nur ->listPrice(Bruttopreis, Nachlass), der Nettopreis wird daraus berechnet.',
+    ],
+    'PEPPOL-EN16931-R055' => [
+        'message' => 'Der Gesamtbetrag der Umsatzsteuer (BT-110) und der Gesamtbetrag der Umsatzsteuer in Buchungswährung (BT-111) müssen dasselbe Vorzeichen haben.',
+        'hint' => 'Prüfen Sie den Wechselkurs (->exchangeRate()), er muss positiv sein.',
+    ],
+    'PEPPOL-EN16931-R110' => [
+        'message' => 'Das Startdatum (BT-134) des Zeitraums der Position :line darf nicht vor dem Beginn des Abrechnungszeitraums (BT-73) liegen.',
+    ],
+    'PEPPOL-EN16931-R111' => [
+        'message' => 'Das Enddatum (BT-135) des Zeitraums der Position :line darf nicht nach dem Ende des Abrechnungszeitraums (BT-74) liegen.',
+    ],
+    'PEPPOL-EN16931-CL007' => [
+        'message' => 'Der Währungscode ":value" ist in Peppol nicht zulässig.',
+        'hint' => 'Die Peppol-Regeln verwenden einen eigenen Stand von ISO 4217, der diesen Code (noch) nicht enthält.',
+    ],
+    'PEPPOL-EN16931-F001' => [
+        'message' => 'Das Datum :value (:bt) muss im Format JJJJ-MM-TT angegeben werden.',
+    ],
+    'PEPPOL-EN16931-P0100' => [
+        'message' => 'Der Rechnungsartcode (BT-3) ":value" ist im Peppol-Geschäftsprozess 01 nicht zulässig.',
+        'hint' => 'Verwenden Sie einen Code des Peppol-Geschäftsprozesses 01, z. B. 380 (Handelsrechnung).',
+    ],
+    'PEPPOL-EN16931-P0101' => [
+        'message' => 'Der Gutschriftsartcode (BT-3) ":value" ist im Peppol-Geschäftsprozess 01 nicht zulässig.',
+        'hint' => 'Der Peppol-Geschäftsprozess 01 erlaubt die Gutschriftsartcodes 81, 83, 381, 396 und 532.',
+    ],
+    'PEPPOL-EN16931-P0112' => [
+        'message' => 'Die Rechnungsartcodes 326 (Teilrechnung) und 384 (korrigierte Rechnung) sind nur erlaubt, wenn Käufer und Verkäufer deutsche Unternehmen sind.',
+    ],
+    'PEPPOL-EN16931-P0104' => [
+        'message' => 'Der Befreiungsgrundcode VATEX-EU-G (BT-121) erfordert die Umsatzsteuerkategorie G (BT-118), nicht :category.',
+    ],
+    'PEPPOL-EN16931-P0105' => [
+        'message' => 'Der Befreiungsgrundcode VATEX-EU-O (BT-121) erfordert die Umsatzsteuerkategorie O (BT-118), nicht :category.',
+    ],
+    'PEPPOL-EN16931-P0106' => [
+        'message' => 'Der Befreiungsgrundcode VATEX-EU-IC (BT-121) erfordert die Umsatzsteuerkategorie K (BT-118), nicht :category.',
+    ],
+    'PEPPOL-EN16931-P0107' => [
+        'message' => 'Der Befreiungsgrundcode VATEX-EU-AE (BT-121) erfordert die Umsatzsteuerkategorie AE (BT-118), nicht :category.',
+    ],
+    'PEPPOL-EN16931-P0108' => [
+        'message' => 'Der Befreiungsgrundcode VATEX-EU-D (BT-121) erfordert die Umsatzsteuerkategorie E (BT-118), nicht :category.',
+    ],
+    'PEPPOL-EN16931-P0109' => [
+        'message' => 'Der Befreiungsgrundcode VATEX-EU-F (BT-121) erfordert die Umsatzsteuerkategorie E (BT-118), nicht :category.',
+    ],
+    'PEPPOL-EN16931-P0110' => [
+        'message' => 'Der Befreiungsgrundcode VATEX-EU-I (BT-121) erfordert die Umsatzsteuerkategorie E (BT-118), nicht :category.',
+    ],
+    'PEPPOL-EN16931-P0111' => [
+        'message' => 'Der Befreiungsgrundcode VATEX-EU-J (BT-121) erfordert die Umsatzsteuerkategorie E (BT-118), nicht :category.',
+    ],
+    'PEPPOL-COMMON-R040' => [
+        'message' => 'Die GLN ":value" (Schema 0088) muss nach den GS1-Regeln gültig sein.',
+    ],
+    'PEPPOL-COMMON-R041' => [
+        'message' => 'Die norwegische Organisationsnummer ":value" (Schema 0192) muss aus neun Ziffern mit gültiger Prüfziffer bestehen.',
+    ],
+    'PEPPOL-COMMON-R042' => [
+        'message' => 'Die dänische Organisationsnummer (CVR) ":value" (Schema 0184) muss aus acht Ziffern bestehen, optional mit vorangestelltem DK.',
+    ],
+    'PEPPOL-COMMON-R043' => [
+        'message' => 'Die belgische Unternehmensnummer ":value" (Schema 0208) muss aus zehn Ziffern mit gültigen Prüfziffern bestehen.',
+    ],
+    'PEPPOL-COMMON-R044' => [
+        'message' => 'Der IPA-Code ":value" (Schema 0201) sollte aus sechs Buchstaben oder Ziffern bestehen.',
+    ],
+    'PEPPOL-COMMON-R045' => [
+        'message' => 'Die italienische Steuernummer (Codice Fiscale) ":value" (Schema 0210) sollte im richtigen Format angegeben werden.',
+    ],
+    'PEPPOL-COMMON-R046' => [
+        'message' => 'Die italienische Steuernummer (Codice Fiscale) ":value" (Schema 9907) sollte im richtigen Format angegeben werden.',
+    ],
+    'PEPPOL-COMMON-R047' => [
+        'message' => 'Die italienische Umsatzsteuer-Identifikationsnummer (Partita IVA) ":value" (Schema 0211) sollte im richtigen Format angegeben werden.',
+    ],
+    'PEPPOL-COMMON-R049' => [
+        'message' => 'Die schwedische Organisationsnummer ":value" (Schema 0007) muss aus zehn Ziffern mit gültiger Prüfziffer bestehen.',
+    ],
+    'PEPPOL-COMMON-R050' => [
+        'message' => 'Die australische Unternehmensnummer (ABN) ":value" (Schema 0151) muss aus elf Ziffern mit gültigen Prüfziffern bestehen.',
+    ],
+    'PEPPOL-COMMON-R052' => [
+        'message' => 'Die dänische P-Nummer ":value" (Schema 0096) sollte aus zehn Ziffern bestehen.',
+    ],
+    'PEPPOL-COMMON-R053' => [
+        'message' => 'Die dänische ERSTORG-Nummer (SE) ":value" (Schema 0198) sollte aus DK und acht Ziffern bestehen.',
     ],
     'QUITTIO-PROFILE-REQUIRED' => [
         'message' => 'Das Feld :field (:bt) ist im Profil :profile Pflicht.',
