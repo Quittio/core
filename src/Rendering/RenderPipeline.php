@@ -8,6 +8,7 @@ use Closure;
 use Psr\Log\LoggerInterface;
 use Quittio\Core\Calculation\TotalsCalculator;
 use Quittio\Core\Config;
+use Quittio\Core\Countries\Capabilities\CompletesInvoices;
 use Quittio\Core\Countries\CountryResolver;
 use Quittio\Core\Countries\MandatoryField;
 use Quittio\Core\Countries\ResolvedCountries;
@@ -88,13 +89,16 @@ final readonly class RenderPipeline
      */
     public function render(InvoiceData $data, RenderOptions $options = new RenderOptions): RenderedInvoice
     {
-        $invoice = $this->calculator->calculate($this->withDefaults($data));
+        $invoice = $this->calculator->calculate($this->withDefaults($data, $options));
         $countries = $this->countryResolver->resolve($invoice, $options->country);
         $locale = $options->locale ?? $invoice->meta->locale ?? $this->config->locale ?? $countries->leading->defaults()->locale;
 
         $results = [];
-        foreach ($this->formats->choose($invoice, $countries, $options) as [$format, $profile]) {
-            $results[$format->key] = $this->renderFormat($invoice, $countries, $format, $profile, $locale, $options);
+        $chosen = $this->formats->choose($invoice, $countries, $options);
+        $eInvoice = $this->producesEInvoice($chosen, $this->presentation->hasWatermark($invoice->presentation, $options));
+        $visualizes = $eInvoice === true ? $this->xmlOnlyEInvoice($chosen) : null;
+        foreach ($chosen as [$format, $profile]) {
+            $results[$format->key] = $this->renderFormat($invoice, $countries, $format, $profile, $locale, $options, $eInvoice, $visualizes);
         }
 
         foreach ($results as $result) {
@@ -109,17 +113,19 @@ final readonly class RenderPipeline
      */
     public function prepare(InvoiceData $data, RenderOptions $options = new RenderOptions): PreparedInvoice
     {
-        $invoice = $this->calculator->calculate($this->withDefaults($data));
+        $invoice = $this->calculator->calculate($this->withDefaults($data, $options));
         $countries = $this->countryResolver->resolve($invoice, $options->country);
         $locale = $options->locale ?? $invoice->meta->locale ?? $this->config->locale ?? $countries->leading->defaults()->locale;
         $watermarked = $this->presentation->hasWatermark($invoice->presentation, $options);
 
         $result = new ValidationResult;
         $formats = [];
-        foreach ($this->formats->choose($invoice, $countries, $options) as [$format, $profile]) {
+        $chosen = $this->formats->choose($invoice, $countries, $options);
+        $eInvoice = $this->producesEInvoice($chosen, $watermarked);
+        foreach ($chosen as [$format, $profile]) {
             $syntax = $this->formats->xmlSyntax($format, $watermarked);
             $formats[$format->key] = $syntax === null ? null : $profile;
-            $subject = new ValidationSubject($invoice, $this->validationContext($profile, $countries, $locale, $options, $syntax));
+            $subject = new ValidationSubject($invoice, $this->validationContext($profile, $countries, $locale, $options, $syntax, $eInvoice));
             $result = $result->merge($this->validateStage($subject, 'data', $format));
             if ($syntax !== null) {
                 $xml = $this->serializer($syntax)->serialize($invoice, $profile, new SerializationOptions($locale));
@@ -153,7 +159,13 @@ final readonly class RenderPipeline
             pdfa: $pdfa,
         ));
 
-        return new RenderedDocument($document, $html, $this->filenamePattern($view->title(), $document->number, $document->issueDate->toIsoString(), $document->type->value), $pdf);
+        // Documents are not validated: their plausibility hints are returned and logged.
+        $notices = $document->notices($locale);
+        foreach ($notices as $notice) {
+            $this->logger?->warning(sprintf('[%s] %s', $notice->code, $notice->message), ['document' => $document->number]);
+        }
+
+        return new RenderedDocument($document, $html, $this->filenamePattern($view->title(), $document->number, $document->issueDate->toIsoString(), $document->type->value), $pdf, $notices);
     }
 
     /**
@@ -191,7 +203,45 @@ final readonly class RenderPipeline
         return $result;
     }
 
-    private function renderFormat(InvoiceData $invoice, ResolvedCountries $countries, OutputFormat $format, Profile $profile, string $locale, RenderOptions $options): RenderedInvoice
+    /**
+     * Whether a format of the run produces an e-invoice: XML of an EN 16931 compliant profile
+     * (not MINIMUM or BASIC WL). Null for a watermarked run (draft or preview), which issues no
+     * invoice.
+     *
+     * @param  list<array{OutputFormat, Profile}>  $chosen
+     */
+    private function producesEInvoice(array $chosen, bool $watermarked): ?bool
+    {
+        if ($watermarked) {
+            return null;
+        }
+        foreach ($chosen as [$format, $profile]) {
+            if ($this->formats->xmlSyntax($format, false) !== null && $profile->isEn16931Compliant()) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * The name of the profile of an e-invoice of the run that is XML only (e.g. "XRechnung 3.0"):
+     * a PDF or HTML of the same run is a readable copy of it. Null without one.
+     *
+     * @param  list<array{OutputFormat, Profile}>  $chosen
+     */
+    private function xmlOnlyEInvoice(array $chosen): ?string
+    {
+        foreach ($chosen as [$format, $profile]) {
+            if ($format->syntax !== null && ! $format->pdf && $profile->isEn16931Compliant()) {
+                return $profile->name();
+            }
+        }
+
+        return null;
+    }
+
+    private function renderFormat(InvoiceData $invoice, ResolvedCountries $countries, OutputFormat $format, Profile $profile, string $locale, RenderOptions $options, ?bool $eInvoice = null, ?string $visualizes = null): RenderedInvoice
     {
         // Checked for the whole run in render(); kept here for formats with XML (defence in depth).
         $watermarked = $this->presentation->hasWatermark($invoice->presentation, $options);
@@ -200,7 +250,7 @@ final readonly class RenderPipeline
         }
 
         $syntax = $this->formats->xmlSyntax($format, $watermarked);
-        $subject = new ValidationSubject($invoice, $this->validationContext($profile, $countries, $locale, $options, $syntax));
+        $subject = new ValidationSubject($invoice, $this->validationContext($profile, $countries, $locale, $options, $syntax, $eInvoice));
         $mode = $options->validation ?? $this->config->validation;
         $result = $this->validated($this->validateStage($subject, 'data', $format, $mode), $mode);
 
@@ -217,7 +267,10 @@ final readonly class RenderPipeline
         if ($format->pdf || $format->html) {
             // PDF/A for embedded XML, otherwise as configured; watermarks need transparency (no PDF/A).
             $pdfa = $format->pdf && ($xml !== null || ($this->config->pdfa && ! $watermarked));
-            $view = (new ViewModelFactory)->build($invoice, $this->viewContext($locale, $countries, $profile, $options, $pdfa, $invoice->presentation));
+            // A PDF or HTML next to an XML-only e-invoice is marked as its readable copy, unless
+            // the option visualization_notice is false.
+            $copy = $xml === null && $visualizes !== null && ($options->options['visualization_notice'] ?? $this->config->options['visualization_notice'] ?? true) !== false;
+            $view = (new ViewModelFactory)->build($invoice, $this->viewContext($locale, $countries, $profile, $options, $pdfa, $invoice->presentation, $copy ? ['visualization_of' => $visualizes] : []));
             $html = $this->templates->render($this->presentation->template($invoice->presentation, $options), $view);
             $title = $view->title();
 
@@ -297,13 +350,17 @@ final readonly class RenderPipeline
     /**
      * Applies configured defaults that the invoice does not set itself.
      */
-    private function withDefaults(InvoiceData $invoice): InvoiceData
+    /**
+     * The configured due date, then what the leading country pack completes (CompletesInvoices).
+     */
+    private function withDefaults(InvoiceData $invoice, RenderOptions $options): InvoiceData
     {
         if ($this->config->dueDays !== null && $invoice->dueDate === null && $invoice->paymentTerms === null && ! $invoice->isCreditNote()) {
-            return $invoice->with(['dueDate' => $invoice->issueDate->addDays($this->config->dueDays)]);
+            $invoice = $invoice->with(['dueDate' => $invoice->issueDate->addDays($this->config->dueDays)]);
         }
+        $pack = $this->countryResolver->resolve($invoice, $options->country)->leading;
 
-        return $invoice;
+        return $pack instanceof CompletesInvoices ? $pack->complete($invoice, $this->config->countrySettings[strtolower($pack->code())] ?? []) : $invoice;
     }
 
     /**
@@ -354,15 +411,23 @@ final readonly class RenderPipeline
 
     /**
      * The syntax of the XML that will be written (option "syntax") lets syntax specific rules
-     * apply, e.g. BR-DEX-15 or third party payments that only UBL can carry.
+     * apply, e.g. BR-DEX-15 or third party payments that only UBL can carry. The option
+     * "e_invoice" tells whether the run produces an e-invoice (rules on the obligation to issue
+     * one), the option "countries" holds the settings of the country packs.
      */
-    private function validationContext(Profile $profile, ResolvedCountries $countries, string $locale, ?RenderOptions $options = null, ?Syntax $syntax = null): ValidationContext
+    private function validationContext(Profile $profile, ResolvedCountries $countries, string $locale, ?RenderOptions $options = null, ?Syntax $syntax = null, ?bool $eInvoice = null): ValidationContext
     {
         return new ValidationContext(
             profile: $profile,
             countryPacks: $countries->all(),
             locale: $locale,
-            options: [...$this->config->options, ...($options->options ?? []), ...($syntax === null ? [] : ['syntax' => $syntax])],
+            options: [
+                ...$this->config->options,
+                ...($options->options ?? []),
+                ...($syntax === null ? [] : ['syntax' => $syntax]),
+                ...($eInvoice === null ? [] : ['e_invoice' => $eInvoice]),
+                'countries' => $this->config->countrySettings,
+            ],
             messageLocale: match ($this->config->validationLocale) {
                 null, '', 'invoice' => null,
                 'app' => Translations::translator()->locale(),
@@ -375,7 +440,10 @@ final readonly class RenderPipeline
      * The context of the view model, with the logo of the presentation already resolved
      * (downloaded, checked, scaled and prepared for PDF/A), so that the view layer does no I/O.
      */
-    private function viewContext(string $locale, ResolvedCountries $countries, ?Profile $profile, RenderOptions $options, bool $pdfa, ?Presentation $own): ViewContext
+    /**
+     * @param  array<string, mixed>  $run  options set by the run, e.g. visualization_of
+     */
+    private function viewContext(string $locale, ResolvedCountries $countries, ?Profile $profile, RenderOptions $options, bool $pdfa, ?Presentation $own, array $run = []): ViewContext
     {
         $defaults = $this->presentation->defaults($options);
         $logo = ($own === null ? $defaults : ViewModelFactory::mergePresentation($own, $defaults ?? new Presentation))?->logo;
@@ -395,6 +463,7 @@ final readonly class RenderPipeline
                 ...$options->options,
                 // Set by the run, not configurable: logos are prepared for PDF/A (no transparency, no SVG).
                 'pdfa' => $pdfa,
+                ...$run,
             ],
             logo: $logo === null || $logo === '' ? null : new ResolvedLogo($logo, (new LogoCache($cache, pdfa: $pdfa))->resolve($logo)),
         );

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Quittio\Core\Documents;
 
 use Brick\Math\BigDecimal;
+use Brick\Math\RoundingMode;
 use DateTimeInterface;
 use Quittio\Core\Builder\InvoiceBuilder;
 use Quittio\Core\Builder\Line;
@@ -28,11 +29,13 @@ use Quittio\Core\Enums\VatCategory;
 use Quittio\Core\Enums\VatExemptionReasonCode;
 use Quittio\Core\Exceptions\InvalidArgumentException;
 use Quittio\Core\Exceptions\InvalidInvoiceData;
+use Quittio\Core\I18n\Translations;
 use Quittio\Core\Support\Amount;
 use Quittio\Core\Support\Date;
 use Quittio\Core\Support\Decimal;
 use Quittio\Core\Support\Macroable;
 use Quittio\Core\Tax\TaxPreset;
+use Quittio\Core\View\IntlFormatter;
 
 /**
  * Fluent builder for documents. Parties, lines, notes, discounts and
@@ -65,13 +68,23 @@ class DocumentBuilder
     /** @var list<array{number: string, date: Date, amount: string, due: ?Date, paid: ?string, description: ?string}> */
     private array $openItems = [];
 
-    /** @var list<array{description: string, amount: string}> */
+    /** @var list<array{description: ?string, amount: string, kind: DunningFeeKind, claim: ?string}> */
     private array $fees = [];
 
     /** @var list<array{base: string, rate: BigDecimal, from: Date, until: Date, description: ?string, dayCount: ?int}> */
     private array $interest = [];
 
     private ?Period $statementPeriod = null;
+
+    private ?Period $bonusPeriod = null;
+
+    private ?string $bonusAgreement = null;
+
+    /** @var list<string> */
+    private array $bonusInvoices = [];
+
+    /** @var list<array{net: BigDecimal, revenue: ?BigDecimal, percent: ?BigDecimal, vat: TaxPreset|VatCategory, rate: BigDecimal|int|string|null, reason: ?string, code: VatExemptionReasonCode|RawCode|string|null, description: ?string}> */
+    private array $bonuses = [];
 
     private ?string $openingBalance = null;
 
@@ -130,6 +143,16 @@ class DocumentBuilder
         $builder->dunningLevel = $level;
 
         return $builder;
+    }
+
+    /**
+     * A bonus statement (Bonusabrechnung): the reduction of the consideration of the supplies of a
+     * bonusPeriod() under a bonusAgreement(), per VAT rate with bonus() or bonusOnRevenue()
+     * (in Germany section 17 (4) UStG).
+     */
+    public static function bonusStatement(): static
+    {
+        return static::make(DocumentType::BonusStatement);
     }
 
     /**
@@ -488,7 +511,23 @@ class DocumentBuilder
      */
     public function fee(string $description, BigDecimal|int|float|string $amount): static
     {
-        $this->fees[] = ['description' => $description, 'amount' => (string) Decimal::rejectFloat($amount)];
+        $this->fees[] = ['description' => $description, 'amount' => (string) Decimal::rejectFloat($amount), 'kind' => DunningFeeKind::Fee, 'claim' => null];
+
+        return $this;
+    }
+
+    /**
+     * Adds the flat rate for recovery costs of a late payment (Article 6 Directive 2011/7/EU;
+     * section 288 (5) BGB: 40 EUR) for one claim, e.g. an invoice or an instalment. It is owed
+     * once per late payment, only by businesses, and counts towards other recovery costs such as
+     * reminder fees, which may then be claimed only in so far as they exceed it.
+     *
+     * @throws InvalidArgumentException for a float amount; when building, for a second flat rate
+     *         of the same claim or a consumer as buyer
+     */
+    public function flatRate(string $claim, BigDecimal|int|string $amount = '40.00', ?string $description = null): static
+    {
+        $this->fees[] = ['description' => $description, 'amount' => (string) Decimal::rejectFloat($amount), 'kind' => DunningFeeKind::FlatRate, 'claim' => $claim];
 
         return $this;
     }
@@ -537,6 +576,130 @@ class DocumentBuilder
         }
 
         return $this;
+    }
+
+    /**
+     * Period of the supplies a bonus statement reduces, e.g. a calendar year.
+     */
+    public function bonusPeriod(Date|DateTimeInterface|string $start, Date|DateTimeInterface|string $end): static
+    {
+        $this->bonusPeriod = new Period(Date::parse($start), Date::parse($end));
+
+        return $this;
+    }
+
+    /**
+     * The agreement a bonus statement is based on, e.g. "der Bonusvereinbarung vom
+     * 15.01.2026"; the statement names it.
+     */
+    public function bonusAgreement(string $agreement): static
+    {
+        $this->bonusAgreement = $agreement;
+
+        return $this;
+    }
+
+    /**
+     * Numbers of the invoices a bonus statement concerns (optional, listed on the statement).
+     */
+    public function bonusInvoices(string ...$numbers): static
+    {
+        $this->bonusInvoices = [...$this->bonusInvoices, ...array_values($numbers)];
+
+        return $this;
+    }
+
+    /**
+     * The reduction of the net amount of one VAT rate of a bonus statement, as a line; the VAT
+     * of the reduction follows from the rate. For exempt supplies pass their category and
+     * exemption reason.
+     */
+    public function bonus(
+        BigDecimal|int|string $net,
+        TaxPreset|VatCategory $vat,
+        BigDecimal|int|string|null $rate = null,
+        ?string $exemptionReason = null,
+        VatExemptionReasonCode|RawCode|string|null $exemptionReasonCode = null,
+        ?string $description = null,
+    ): static {
+        $this->bonuses[] = ['net' => Decimal::of($net), 'revenue' => null, 'percent' => null, 'vat' => $vat, 'rate' => $rate, 'reason' => $exemptionReason, 'code' => $exemptionReasonCode, 'description' => $description];
+
+        return $this;
+    }
+
+    /**
+     * The reduction of one VAT rate as a percentage of the revenue of that rate in the period,
+     * e.g. 3 % of 100,000.00: a line of 3,000.00 with the revenue and the percentage as description.
+     */
+    public function bonusOnRevenue(
+        BigDecimal|int|string $revenue,
+        BigDecimal|int|string $percent,
+        TaxPreset|VatCategory $vat,
+        BigDecimal|int|string|null $rate = null,
+        ?string $exemptionReason = null,
+        VatExemptionReasonCode|RawCode|string|null $exemptionReasonCode = null,
+    ): static {
+        $revenue = Decimal::of($revenue);
+        $percent = Decimal::of($percent);
+        $this->bonuses[] = [
+            'net' => $revenue->multipliedBy($percent)->dividedBy(100, Amount::SCALE, RoundingMode::HalfUp),
+            'revenue' => $revenue, 'percent' => $percent, 'vat' => $vat, 'rate' => $rate, 'reason' => $exemptionReason, 'code' => $exemptionReasonCode, 'description' => null,
+        ];
+
+        return $this;
+    }
+
+    /**
+     * The VAT of a bonus line. Intra-community supplies and exports state the reduction of their
+     * consideration instead of the exemption text of a supply, unless a reason is given.
+     *
+     * @param  array{net: BigDecimal, revenue: ?BigDecimal, percent: ?BigDecimal, vat: TaxPreset|VatCategory, rate: BigDecimal|int|string|null, reason: ?string, code: VatExemptionReasonCode|RawCode|string|null, description: ?string}  $bonus
+     * @return array{TaxPreset|VatCategory, BigDecimal|int|string|null, ?string, VatExemptionReasonCode|RawCode|string|null}
+     */
+    private static function bonusVat(array $bonus, string $intraCommunity, string $export): array
+    {
+        $vat = $bonus['vat'];
+        $category = $vat instanceof TaxPreset ? $vat->category() : $vat;
+        $reason = match ($category) {
+            VatCategory::IntraCommunitySupply => $intraCommunity,
+            VatCategory::Export => $export,
+            default => null,
+        };
+        if ($reason === null || $bonus['reason'] !== null) {
+            return [$vat, $bonus['rate'], $bonus['reason'], $bonus['code']];
+        }
+        $code = $bonus['code'] ?? ($vat instanceof TaxPreset ? $vat->exemptionReasonCode() : null)
+            ?? ($category === VatCategory::IntraCommunitySupply ? VatExemptionReasonCode::IntraCommunitySupply : VatExemptionReasonCode::Export);
+
+        return [$category, $bonus['rate'] ?? ($vat instanceof TaxPreset ? $vat->rate() : null) ?? '0', $reason, $code];
+    }
+
+    /**
+     * The invoice builder with the lines of bonus() and bonusOnRevenue(), named in the locale
+     * and with amounts in the currency of the document.
+     */
+    private function withBonusLines(): InvoiceBuilder
+    {
+        if ($this->bonuses === []) {
+            return $this->invoice;
+        }
+        $settings = $this->invoice->buildDraft();
+        $locale = $settings->meta->locale ?? 'en';
+        $translator = Translations::translator();
+        $formatter = new IntlFormatter;
+        $invoice = clone $this->invoice;
+        foreach ($this->bonuses as $bonus) {
+            $description = $bonus['description'] ?? ($bonus['revenue'] === null || $bonus['percent'] === null ? null : $translator->get('quittio::labels.bonus_on_revenue', [
+                'percent' => $formatter->percent($bonus['percent'], $locale),
+                'revenue' => $formatter->money(Amount::of($bonus['revenue']->toScale(Amount::SCALE, RoundingMode::HalfUp), $settings->currency), $locale),
+            ], $locale));
+            $name = $translator->get('quittio::labels.bonus_line', [], $locale);
+            [$vat, $rate, $reason, $code] = self::bonusVat($bonus, $translator->get('quittio::labels.bonus_reason_intra_community', [], $locale), $translator->get('quittio::labels.bonus_reason_export', [], $locale));
+            $invoice->line(static fn (LineBuilder $line): LineBuilder => $line->name($name)->description($description)->quantity(1, UnitCode::LumpSum)
+                ->netPrice($bonus['net'])->vat($vat, $rate, $reason, $code));
+        }
+
+        return $invoice;
     }
 
     /**
@@ -613,7 +776,7 @@ class DocumentBuilder
      */
     public function build(): DocumentData
     {
-        $draft = $this->invoice->buildDraft();
+        $draft = $this->withBonusLines()->buildDraft();
         $currency = $draft->currency;
 
         $lineOptions = [];
@@ -643,7 +806,14 @@ class DocumentBuilder
             delivery: $draft->delivery,
             packages: $this->packages,
             dunning: $this->type === DocumentType::PaymentReminder
-                ? $this->buildDunning($currency)
+                ? $this->buildDunning($currency, $draft->meta->locale ?? 'en', $draft->buyer->isConsumer)
+                : null,
+            bonus: $this->type === DocumentType::BonusStatement
+                ? new BonusStatement(
+                    period: $this->bonusPeriod ?? throw new InvalidArgumentException('A bonus statement requires its period: bonusPeriod($start, $end).'),
+                    agreement: $this->bonusAgreement ?? throw new InvalidArgumentException('A bonus statement requires the agreement it is based on: bonusAgreement(…).'),
+                    invoices: $this->bonusInvoices,
+                )
                 : null,
             statement: $this->type === DocumentType::AccountStatement
                 ? new AccountStatement(
@@ -674,13 +844,42 @@ class DocumentBuilder
         ), $this->openItems);
     }
 
-    private function buildDunning(string $currency): Dunning
+    /**
+     * The fees; a flat rate without description gets the label "dunning_flat_rate".
+     *
+     * @return list<DunningFee>
+     *
+     * @throws InvalidArgumentException for a second flat rate of a claim or a flat rate for a consumer
+     */
+    private function dunningFees(string $currency, string $locale, bool $consumer): array
+    {
+        $claims = [];
+        $fees = [];
+        foreach ($this->fees as $fee) {
+            if ($fee['kind'] === DunningFeeKind::FlatRate) {
+                $claim = (string) $fee['claim'];
+                if ($consumer) {
+                    throw new InvalidArgumentException(sprintf('The flat rate for recovery costs (claim %s) applies only to businesses, not to consumers (Article 6 Directive 2011/7/EU, section 288 (5) BGB).', $claim));
+                }
+                if (isset($claims[$claim])) {
+                    throw new InvalidArgumentException(sprintf('The flat rate for recovery costs of claim %s is added twice: it is owed once per late payment.', $claim));
+                }
+                $claims[$claim] = true;
+            }
+            $description = $fee['description'] ?? Translations::translator()->get('quittio::labels.dunning_flat_rate', ['claim' => (string) $fee['claim']], $locale);
+            $fees[] = new DunningFee($description, Amount::of($fee['amount'], $currency), $fee['kind'], $fee['claim']);
+        }
+
+        return $fees;
+    }
+
+    private function buildDunning(string $currency, string $locale, bool $consumer): Dunning
     {
         return new Dunning(
             level: $this->dunningLevel,
             openItems: $this->buildOpenItems($currency),
             deadline: $this->deadline,
-            fees: array_map(static fn (array $fee): DunningFee => new DunningFee($fee['description'], Amount::of($fee['amount'], $currency)), $this->fees),
+            fees: $this->dunningFees($currency, $locale, $consumer),
             interest: array_map(static fn (array $entry): InterestCharge => new InterestCharge(
                 base: Amount::of($entry['base'], $currency),
                 ratePercent: $entry['rate'],
