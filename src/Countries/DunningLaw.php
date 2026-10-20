@@ -19,6 +19,10 @@ final readonly class DunningLaw
      *         (365 or 366 days per calendar year, InterestCharge::ACTUAL_ACTUAL)
      * @param  int|null  $consumerDefaultAfterDays  days after due date and receipt after which a consumer is in
      *         default without a reminder, if the invoice points this out (e.g. section 286 (3) BGB); null = no such rule
+     * @param  string|null  $b2cFixedRate  fixed rate in percent for consumers instead of the reference rate plus
+     *         $b2cInterestPoints (e.g. 4 % in Austria, section 1000 (1) ABGB); null = reference rate plus points
+     * @param  string|null  $b2bFixedRate  fixed rate in percent for businesses instead of the reference rate plus
+     *         $b2bInterestPoints (e.g. 5 % in Switzerland, Art. 104 OR); null = reference rate plus points
      */
     public function __construct(
         public string $b2bInterestPoints = '8.00',
@@ -27,5 +31,15 @@ final readonly class DunningLaw
         public ?int $dayCount = 365,
         public ?int $consumerDefaultAfterDays = null,
         public ?string $referenceRateName = null,
+        public ?string $b2cFixedRate = null,
+        public ?string $b2bFixedRate = null,
     ) {}
+
+    /**
+     * Whether the law needs no reference rate: fixed rates for businesses and consumers.
+     */
+    public function hasFixedRates(): bool
+    {
+        return $this->b2bFixedRate !== null && $this->b2cFixedRate !== null;
+    }
 }
