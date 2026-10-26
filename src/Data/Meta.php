@@ -41,12 +41,13 @@ final readonly class Meta
     public const string FLAG_DECLARED_AMOUNTS_RECALCULATED = 'declared_amounts_recalculated';
 
     /**
-     * A partial cancellation whose VAT (BT-117, BT-111) is aligned with the earlier partial
-     * cancellations of the original (Corrections\CancellationHistory), in gross price mode also its
-     * taxable amounts (BT-116): a VAT amount may differ from round2(taxable amount × rate) by a cent,
-     * reported as QUITTIO-CANCELLATION-VAT-ALIGNED instead of QUITTIO-VAT-ROUNDING (which still
-     * reports larger differences and a sign other than that of the taxable amount). Dropped once
-     * amounts change.
+     * A partial cancellation or price reduction whose VAT (BT-117, BT-111) is aligned with the
+     * earlier partial cancellations and price reductions of the original (Corrections\CancellationHistory),
+     * in gross price mode also the taxable amounts (BT-116) of a partial cancellation: a VAT amount
+     * may differ from round2(taxable amount × rate) by a cent, reported as
+     * QUITTIO-CANCELLATION-VAT-ALIGNED instead of QUITTIO-VAT-ROUNDING (which still reports larger
+     * differences and a sign other than that of the taxable amount). Dropped once amounts change.
+     * The name stays for stored data; it covers price reductions as well.
      */
     public const string FLAG_CANCELLATION_VAT_ALIGNED = 'cancellation_vat_aligned';
 
@@ -55,6 +56,16 @@ final readonly class Meta
      * section 17 UStG), not a cancellation or correction of it.
      */
     public const string FLAG_PRICE_REDUCTION = 'price_reduction';
+
+    /**
+     * A full or partial cancellation or a corrected invoice (Corrections\Cancellation,
+     * Corrections\Correction) of a prepayment invoice (type code 386): it reverses or replaces an
+     * invoice for an advance payment, for a supply not made yet. Set by Quittio and kept by the
+     * documents built from it, e.g. the cancellation of such a cancellation; country packs treat
+     * these documents like the prepayment invoice (DE-USTG-03: no date of the supply), and a
+     * price reduction (Corrections\PriceReduction) refuses them.
+     */
+    public const string FLAG_PREPAYMENT_CORRECTION = 'prepayment_correction';
 
     /** Prefix of the flag that carries the fingerprint of the amount inputs. */
     private const string FINGERPRINT_PREFIX = 'amounts_fingerprint:';
