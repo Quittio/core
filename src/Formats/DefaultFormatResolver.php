@@ -28,9 +28,6 @@ use Quittio\Core\Exceptions\ConfigurationException;
  */
 final class DefaultFormatResolver implements FormatResolver
 {
-    /** @deprecated use VatTerritory::EU_MEMBER_STATES */
-    public const array EU_COUNTRIES = VatTerritory::EU_MEMBER_STATES;
-
     /**
      * @param  (Closure(BuyerParty): bool)|null  $peppolLookup  returns true if the buyer is reachable via Peppol
      */
@@ -40,6 +37,11 @@ final class DefaultFormatResolver implements FormatResolver
         private readonly ?Closure $peppolLookup = null,
     ) {}
 
+    /**
+     * Format and profile for $invoice in the order described above, with the reason of the choice.
+     *
+     * @throws ConfigurationException when EXTENDED features are used but the profile upgrade is off
+     */
     public function resolve(InvoiceData $invoice, ResolvedCountries $countries): FormatChoice
     {
         return $this->upgrade($invoice, $this->choose($invoice, $countries));

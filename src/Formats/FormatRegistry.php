@@ -16,16 +16,6 @@ final class FormatRegistry
 
     public const string FACTUR_X = 'factur-x';
 
-    /**
-     * @deprecated the German pack registers XRechnung, use Quittio\Country\DE\Formats\XRechnungFormats::CII
-     */
-    public const string XRECHNUNG_CII = 'xrechnung-cii';
-
-    /**
-     * @deprecated the German pack registers XRechnung, use Quittio\Country\DE\Formats\XRechnungFormats::UBL
-     */
-    public const string XRECHNUNG_UBL = 'xrechnung-ubl';
-
     public const string CII = 'cii';
 
     public const string UBL = 'ubl';
@@ -44,13 +34,14 @@ final class FormatRegistry
     /** @var array<string, string> */
     private array $aliases = [];
 
+    /**
+     * A registry with the built-in formats zugferd (alias factur-x, facturx), cii, ubl, peppol,
+     * pdf, html and json.
+     */
     public static function withDefaults(): self
     {
         $registry = new self;
         $registry->register(new OutputFormat(self::ZUGFERD, Syntax::Cii, pdf: true, embedsXml: true, defaultProfile: 'en16931'));
-        // Until 1.0 also without the German pack, which registers the same formats (ProvidesFormats).
-        $registry->register(new OutputFormat('xrechnung-cii', Syntax::Cii, defaultProfile: 'xrechnung', profiles: ['xrechnung', 'xrechnung-extension', 'xrechnung-cvd']));
-        $registry->register(new OutputFormat('xrechnung-ubl', Syntax::Ubl, defaultProfile: 'xrechnung', profiles: ['xrechnung', 'xrechnung-extension', 'xrechnung-cvd']));
         $registry->register(new OutputFormat(self::CII, Syntax::Cii, defaultProfile: 'en16931'));
         $registry->register(new OutputFormat(self::UBL, Syntax::Ubl, defaultProfile: 'en16931'));
         $registry->register(new OutputFormat(self::PEPPOL, Syntax::Ubl, defaultProfile: 'peppol', profiles: ['peppol']));
@@ -59,30 +50,45 @@ final class FormatRegistry
         $registry->register(new OutputFormat(self::JSON, json: true));
         $registry->alias(self::FACTUR_X, self::ZUGFERD);
         $registry->alias('facturx', self::ZUGFERD);
-        $registry->alias('xrechnung', 'xrechnung-cii');
 
         return $registry;
     }
 
+    /**
+     * Registers $format under its key; it replaces a format registered earlier under the same key.
+     * Changes this instance.
+     */
     public function register(OutputFormat $format): self
     {
-        $this->formats[$format->key] = $format;
+        $this->formats[strtolower($format->key)] = $format;
 
         return $this;
     }
 
+    /**
+     * Makes $alias (any case) another name for the format $key, e.g. "factur-x" for "zugferd".
+     * Changes this instance.
+     */
     public function alias(string $alias, string $key): self
     {
-        $this->aliases[strtolower($alias)] = $key;
+        $this->aliases[strtolower($alias)] = strtolower($key);
 
         return $this;
     }
 
+    /**
+     * Whether a format is registered under $key or an alias of it (any case).
+     */
     public function has(string $key): bool
     {
         return isset($this->formats[$this->resolveKey($key)]);
     }
 
+    /**
+     * The format registered under $key or an alias of it (any case).
+     *
+     * @throws ConfigurationException when no such format is registered
+     */
     public function get(string $key): OutputFormat
     {
         return $this->formats[$this->resolveKey($key)]

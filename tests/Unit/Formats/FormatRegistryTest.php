@@ -20,8 +20,6 @@ it('resolves format keys and aliases case-insensitively', function (string $key,
     ['ZUGFeRD', 'zugferd'],
     ['factur-x', 'zugferd'],
     ['FacturX', 'zugferd'],
-    ['xrechnung', 'xrechnung-cii'],
-    ['XRechnung-UBL', 'xrechnung-ubl'],
     ['peppol', 'peppol'],
 ]);
 
@@ -29,7 +27,7 @@ it('names the known formats for an unknown key', function () {
     expect(FormatRegistry::withDefaults()->has('edifact'))->toBeFalse();
 
     FormatRegistry::withDefaults()->get('edifact');
-})->throws(ConfigurationException::class, 'Unknown format "edifact". Known formats: zugferd, xrechnung-cii');
+})->throws(ConfigurationException::class, 'Unknown format "edifact". Known formats: zugferd, cii, ubl');
 
 it('describes what each default format produces', function (string $key, ?Syntax $syntax, bool $pdf, bool $embeds, bool $eInvoice) {
     $format = FormatRegistry::withDefaults()->get($key);
@@ -51,9 +49,8 @@ it('describes what each default format produces', function (string $key, ?Syntax
 it('restricts profiles only where the format names them', function () {
     $registry = FormatRegistry::withDefaults();
 
-    expect($registry->get('xrechnung-cii')->allowsProfile('xrechnung-extension'))->toBeTrue()
-        ->and($registry->get('xrechnung-cii')->allowsProfile('en16931'))->toBeFalse()
-        ->and($registry->get('peppol')->allowsProfile('peppol'))->toBeTrue()
+    expect($registry->get('peppol')->allowsProfile('peppol'))->toBeTrue()
+        ->and($registry->get('peppol')->allowsProfile('en16931'))->toBeFalse()
         ->and($registry->get('cii')->allowsProfile('extended'))->toBeTrue();
 });
 
@@ -64,6 +61,16 @@ it('registers national formats and aliases next to the defaults', function () {
 
     expect($registry->get('fatturapa-xml')->key)->toBe('fatturapa')
         ->and(array_keys($registry->all()))->toContain('zugferd', 'fatturapa');
+});
+
+it('finds formats and alias targets registered with upper-case keys', function () {
+    $registry = FormatRegistry::withDefaults()
+        ->register(new OutputFormat('FatturaPA', Syntax::Ubl, defaultProfile: 'en16931'))
+        ->alias('sdi', 'FatturaPA');
+
+    expect($registry->has('fatturapa'))->toBeTrue()
+        ->and($registry->get('FATTURAPA')->key)->toBe('FatturaPA')
+        ->and($registry->get('SDI')->key)->toBe('FatturaPA');
 });
 
 it('detects data that only EXTENDED can carry', function () {
