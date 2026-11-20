@@ -90,9 +90,8 @@ it('turns page breaks into breaks and page selectors into blocks on named pages'
     $body = convertedBody(mpdfMarkup('<p>One</p><pagebreak /><p>Two</p><pagebreak page-selector="slip" /><p>Three</p><pagebreak /><p>Four</p><pagebreak page-selector="other"><p>Five</p>'));
 
     expect($body)->toBe('<p>One</p><div class="mpdf-page" style="break-before: page;"></div><p>Two</p>'
-        .'<div class="mpdf-page" style="break-before: page; page: slip;"><p>Three</p></div>'
-        // The page selector applies until another one is given.
-        .'<div class="mpdf-page" style="break-before: page; page: slip;"><p>Four</p></div>'
+        // The page selector applies until another one is given: a page break without one stays in its page group.
+        .'<div class="mpdf-page" style="break-before: page; page: slip;"><p>Three</p><div class="mpdf-page" style="break-before: page;"></div><p>Four</p></div>'
         .'<div class="mpdf-page" style="break-before: page; page: other;"><p>Five</p></div>');
 });
 
@@ -101,20 +100,26 @@ it('breaks the page for a page break inside another element', function () {
         ->toBe('<div><p>One</p><div class="mpdf-page" style="break-before: page;"></div><p>Two</p></div>');
 });
 
-it('gives the first page of a page selector the header and footer of the first page, as mPDF does', function () {
+it('gives the first page of a page selector the rules of the first page, as mPDF does', function () {
     $html = (new MpdfMarkupConverter)->convert(mpdfMarkup(
         '<htmlpageheader name="first"></htmlpageheader><htmlpageheader name="main">Head</htmlpageheader><htmlpagefooter name="foot">Foot</htmlpagefooter>'
-        .'<p>One</p><pagebreak page-selector="slip" /><p>Slip</p>',
-        '@page { header: html_main; footer: html_foot; } @page :first { header: html_first; } @page slip { footer: none; }',
+        .'<p>One</p><pagebreak page-selector="slip" /><p>Slip</p><pagebreak page-selector="slip" /><p>Second slip</p>',
+        '@page { header: html_main; footer: html_foot; } @page :first { margin: 15mm 5mm 30mm; size: A5; header: html_first; @top-left { content: "x"; } } @page slip { footer: none; margin-bottom: 10mm; }',
     ));
 
-    // The header of the first page on the first page of the section, the regular one after it;
-    // the footer is the same on both.
-    expect($html)->toContain('<div class="mpdf-page" style="break-before: page; page: slip;">'
-        .'<div class="mpdf-header" style="position: running(mpdf-page-slip-header);"></div>'
-        .'<div class="mpdf-header" style="position: running(mpdf-page-slip-header);">Head</div><p>Slip</p></div>')
-        ->and($html)->toContain("<style>\n@page slip { @top-center { content: element(mpdf-page-slip-header); } }\n</style>\n</head>")
-        ->and($html)->not->toContain('mpdf-page-slip-footer');
+    // The rules of :first without size and the left and right margins, then those of the named
+    // page again; one rule for every page group of that name.
+    expect($html)->toContain("<style>\n@page slip:nth(1 of slip) { margin-top: 15mm; margin-bottom: 30mm; margin-bottom: 10mm;\n"
+        ."      @top-left { content: \"x\"; }\n      @top-center { content: element(mpdf-header-first); }\n      @bottom-center { content: none; } }\n</style>\n</head>")
+        ->and($html)->toContain('<div class="mpdf-page" style="break-before: page; page: slip;"><p>Slip</p></div><div class="mpdf-page" style="break-before: page; page: slip;"><p>Second slip</p></div>')
+        ->and(substr_count($html, ':nth('))->toBe(1)
+        ->and($html)->not->toContain('mpdf-page-slip');
+});
+
+it('adds no rules for named pages without rules of the first page', function () {
+    $html = (new MpdfMarkupConverter)->convert(mpdfMarkup('<p>One</p><pagebreak page-selector="slip" /><p>Slip</p>', '@page slip { footer: none; }'));
+
+    expect($html)->not->toContain(':nth(');
 });
 
 it('draws positioned children of the body in a layer over the sheet of their page', function () {
@@ -131,6 +136,57 @@ it('draws positioned children of the body in a layer over the sheet of their pag
         // mPDF places fixed elements like absolute ones; nested ones stay where they are.
         .$layer('<div style="position: fixed; top: 5mm; position: absolute;">Stamp</div>')
         .'<div class="box"><div class="mark"></div></div>');
+});
+
+it('places positioned elements before the content of a page in its page area, with the margins of that page', function () {
+    $body = convertedBody(mpdfMarkup(
+        '<watermarktext content="X" /><div class="mark" style="top: 105mm"></div> <div class="address">Address</div><p>Flow</p>'
+        .'<pagebreak page-selector="slip" /><div class="slip" style="top: 192mm; left: 5mm; width: 200mm; height: 105mm">Slip</div>'
+        .'<pagebreak /><div class="slip" style="top: 50mm; left: 30mm; position: fixed">Next</div>',
+        '@page { margin: 40mm 19mm 37mm 20mm; } @page :first { margin-top: 15mm; margin-left: 30mm; } @page slip { margin: 0; margin-top: 1cm; } '
+        .'.mark { position: absolute; left: 0; width: 4.2mm; } .address { position: absolute; top: 45mm; left: 30mm; width: 85mm; height: 45mm; } .slip { position: absolute; }',
+    ));
+
+    $area = static fn (string $elements): string => '<div class="mpdf-area" style="position: relative; display: flow-root; height: 0;">'.$elements.'</div>';
+
+    // The fold mark lies in the page margin: in the layer over the sheet. The address from the
+    // edges of the page area of the first page (its top and left margins come from :first).
+    expect($body)->toContain('<div class="mpdf-sheet" style="position: running(mpdf-sheet);"><div style="position: relative; width: 210mm; height: 297mm;"><div class="mark" style="top: 105mm"></div></div></div><div style="position: running(mpdf-sheet);"></div> '
+        .$area('<div class="address" style="top: 30mm !important; left: 0mm !important;">Address</div>').'<p>Flow</p>')
+        // The first page of a named page: :first without its left margin, then the named page.
+        ->and($body)->toContain('page: slip;">'.$area('<div class="slip" style="top: 192mm; left: 5mm; width: 200mm; height: 105mm; top: 182mm !important; left: 5mm !important;">Slip</div>'))
+        // The following pages of the named page; fixed like absolute.
+        ->and($body)->toContain('<div class="mpdf-page" style="break-before: page;"></div>'
+            .$area('<div class="slip" style="top: 50mm; left: 30mm; position: fixed; position: absolute; top: 40mm !important; left: 30mm !important;">Next</div>'));
+});
+
+it('draws positioned elements in the layer over the sheet unless they lie in the page area of a known page', function (string $style, string $before = '') {
+    $body = convertedBody(mpdfMarkup($before.'<div style="position: absolute; '.$style.'">X</div>', '@page { margin: 20mm; }'));
+
+    expect($body)->toContain('mpdf-sheet')
+        ->and($body)->not->toContain('mpdf-area');
+})->with([
+    'in the left margin' => ['top: 30mm; left: 10mm;'],
+    'in the top margin' => ['top: 10mm; left: 30mm;'],
+    'reaching into the right margin' => ['top: 30mm; left: 30mm; width: 170mm;'],
+    'reaching into the bottom margin' => ['top: 250mm; left: 30mm; height: 40mm;'],
+    'below the page area' => ['top: 280mm; left: 30mm;'],
+    'without left' => ['top: 30mm;'],
+    'with right' => ['top: 30mm; left: 30mm; right: 30mm;'],
+    'with bottom' => ['top: 30mm; left: 30mm; bottom: 30mm;'],
+    'in relative units' => ['top: 10%; left: 30mm;'],
+    'with a width in relative units' => ['top: 30mm; left: 30mm; width: 50%;'],
+    'after content of the page' => ['top: 30mm; left: 30mm;', '<p>Flow</p>'],
+    'on a page of unknown size' => ['top: 30mm; left: 30mm;', '<pagebreak page-selector="wide" /><style>@page wide { size: auto; }</style>'],
+]);
+
+it('reads the page size and margins of the page in absolute units', function () {
+    $body = convertedBody(mpdfMarkup(
+        '<pagebreak page-selector="wide" /><div style="position: absolute; top: 1in; left: 72pt; width: 240mm">Wide</div>',
+        '@page wide { sheet-size: A4-L; margin: 0.5in 96px 2cm 6pc; }',
+    ));
+
+    expect($body)->toContain('top: 12.7mm !important; left: 0mm !important;');
 });
 
 it('takes the position from the winning rule', function () {
@@ -193,7 +249,7 @@ it('puts the carry-over rows into the head and foot of the line table', function
 
     $body = convertedBody($html);
 
-    expect($body)->toBe('<table class="lines" style="width: 100%; border-collapse: separate; border-spacing: 0;"><thead><tr><th>Pos.</th><th>Amount</th></tr>'
+    expect($body)->toBe('<table class="lines" style="width: 100%"><thead><tr><th>Pos.</th><th>Amount</th></tr>'
         .'<tr data-mpdf-carry class="carry carry-in"><td>Brought forward from page <span class="mpdf-previous-page"></span></td><td><span class="mpdf-carry-amount"></span></td></tr></thead>'
         .'<tfoot><tr data-mpdf-carry class="carry carry-out"><td>Continued on page <span class="mpdf-next-page"></span></td><td><span class="mpdf-carry-amount"></span></td></tr></tfoot><tbody>'
         .'<!--quittio:rows--><tr class="line" data-carry-over="10,00 €"><td>1</td><td>10,00 €</td></tr><!--/quittio:rows-->'
